@@ -1,0 +1,7 @@
+# Hemnyckel relay (Home Assistant add-on)
+fastapi==0.115.*
+uvicorn[standard]==0.34.*
+httpx[http2]==0.28.*
+PyJWT==2.10.*
+cryptography==44.*
+websockets==14.*

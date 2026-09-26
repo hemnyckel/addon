@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hemnyckel.local/schemas/event.json",
+  "title": "Hemnyckel Event",
+  "type": "object",
+  "required": ["id", "ts", "door", "action", "source"],
+  "properties": {
+    "id": { "type": "string" },
+    "ts": { "type": "number", "description": "Unix epoch seconds" },
+    "door": { "type": "string", "description": "door id, e.g. front" },
+    "person": { "type": ["string", "null"], "description": "person id, null if unknown" },
+    "slot": { "type": ["integer", "null"], "description": "lock slot number" },
+    "action": { "enum": ["lock", "unlock"] },
+    "source": {
+      "enum": ["keypad", "finger", "tag", "auto", "unattributed"],
+      "description": "how the lock was operated"
+    },
+    "method": { "type": ["string", "null"], "description": "human readable method" },
+    "door_open": { "type": ["boolean", "null"], "description": "from a door sensor, if any" }
+  }
+}
