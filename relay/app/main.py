@@ -31,9 +31,6 @@ class State:
         self.pair_code = secrets.token_hex(3).upper()
         self.pair_expires = time.time() + 600
         self.sockets: set[WebSocket] = set()
-        # Journal events and state changes describe the same physical action; keep
-        # the (door, action) of the last journal event so the state twin is dropped.
-        self._journal_recent: dict[tuple[str, str], float] = {}
 
     # -- incoming events -----------------------------------------------------
     async def on_ha_event(self, event: dict[str, Any]) -> None:
@@ -41,16 +38,6 @@ class State:
             mapped = from_ha(self.cfg, event)
             if mapped is None:
                 return
-            key = (mapped["door"], mapped["action"])
-            if event.get("event_type") == "nimly_journal_entry":
-                self._journal_recent[key] = mapped["ts"]
-            else:
-                # A state change that the journal already described (same door and
-                # action, seconds apart) is the same physical event: drop it so the
-                # family gets one notification, not two.
-                journalled = self._journal_recent.get(key)
-                if journalled is not None and abs(mapped["ts"] - journalled) <= 10:
-                    return
             self.store.add_event(mapped)
             await self.broadcast(mapped)
             await self.notify(mapped)
@@ -82,6 +69,9 @@ class State:
     async def notify(self, ev: dict[str, Any]) -> None:
         door = self.cfg.door(ev["door"])
         if door is None:
+            return
+        # System events (auto-relock) are mirrored but never interrupt anyone.
+        if ev.get("source") == "auto":
             return
         payload = self._payload(ev, door)
         for device in self.store.devices():

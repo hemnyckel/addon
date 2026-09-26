@@ -108,8 +108,9 @@ def from_state(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def from_ha(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
+    # The integration's journal is the attributed source of truth (who / when /
+    # how). Lock state changes are read live via the state endpoint, not turned
+    # into events, so one physical action yields exactly one notification.
     if event.get("event_type") == "nimly_journal_entry":
         return from_journal(cfg, event)
-    if event.get("event_type") == "state_changed":
-        return from_state(cfg, event)
     return None
