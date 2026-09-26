@@ -34,13 +34,15 @@ class State:
 
     # -- incoming events -----------------------------------------------------
     async def on_ha_event(self, event: dict[str, Any]) -> None:
-        mapped = from_ha(self.cfg, event)
-        if mapped is None:
-            return
-        # de-duplicate state changes that follow an attributed journal entry
-        self.store.add_event(mapped)
-        await self.broadcast(mapped)
-        await self.notify(mapped)
+        try:
+            mapped = from_ha(self.cfg, event)
+            if mapped is None:
+                return
+            self.store.add_event(mapped)
+            await self.broadcast(mapped)
+            await self.notify(mapped)
+        except Exception:  # noqa: BLE001 - never let one event kill the HA session
+            _LOGGER.exception("failed to handle Home Assistant event")
 
     # -- push ----------------------------------------------------------------
     def _payload(self, ev: dict[str, Any], door: Door) -> dict[str, Any]:

@@ -11,9 +11,22 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import datetime
 from typing import Any
 
 from .config import Config
+
+
+def _to_epoch(value: Any, fallback: float | None = None) -> float:
+    """Accept an epoch number, an ISO 8601 string, or fall back to now."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    return fallback if fallback is not None else time.time()
 
 _SOURCE = {
     "keypad": "keypad",
@@ -61,7 +74,7 @@ def from_journal(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
         person = door.persons.get(str(slot))
     return {
         "id": uuid.uuid4().hex,
-        "ts": float(entry.get("time") or event.get("time_fired_ts") or time.time()),
+        "ts": _to_epoch(entry.get("time"), _to_epoch(event.get("time_fired"))),
         "door": door.id,
         "person": person,
         "slot": slot,
@@ -83,7 +96,7 @@ def from_state(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
         return None
     return {
         "id": uuid.uuid4().hex,
-        "ts": float(event.get("time_fired_ts") or time.time()),
+        "ts": _to_epoch(event.get("time_fired_ts") or event.get("time_fired")),
         "door": door.id,
         "person": None,
         "slot": None,
