@@ -23,6 +23,8 @@ _SOURCE = {
     "tag": "tag",
     "rfid": "tag",
     "auto": "auto",
+    "zigbee": "unattributed",
+    "unattributed": "unattributed",
 }
 
 
