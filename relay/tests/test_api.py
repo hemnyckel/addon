@@ -67,6 +67,27 @@ def test_pairing_is_rate_limited(cfg, monkeypatch):
         assert client.post("/api/pair", json={"code": "NOPE", "name": "x"}).status_code == 429
 
 
+def test_an_owner_can_mint_a_pairing_code(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = client.post("/api/pair",
+                            json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]
+        user = client.post("/api/pair",
+                           json={"code": hmk.pair_code, "name": "User"}).json()["device_token"]
+
+        # Only an owner may mint a code.
+        assert client.post("/api/pair-code",
+                           headers={"Authorization": f"Bearer {user}"}).status_code == 403
+
+        minted = client.post("/api/pair-code", headers={"Authorization": f"Bearer {owner}"}).json()
+        assert minted["expires_in"] == 600
+
+        # …and it really pairs the next device.
+        assert client.post("/api/pair",
+                           json={"code": minted["code"], "name": "iPad"}).status_code == 200
+
+
 def test_the_first_device_is_the_owner_and_manages_people(cfg):
     app = create_app(cfg)
     with TestClient(app) as client:

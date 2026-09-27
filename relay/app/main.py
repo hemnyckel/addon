@@ -54,6 +54,8 @@ _AUTO_METHOD = "Automatiskt"
 # from the internet through a reverse proxy: bound the attempts per client.
 _PAIR_MAX_ATTEMPTS = 10
 _PAIR_WINDOW = 60
+# How long a pairing code stays valid.
+_PAIR_TTL = 600
 # Roles a device can hold. Guests (a time window and chosen doors) come later.
 _ROLES = {"owner", "user"}
 # Upper bound on concurrent pushes, so a busy household can't open thousands
@@ -77,8 +79,9 @@ class State:
         self.store.ensure_owner()
         self.apns = ApnsClient(cfg)
         self.ha = HaClient(cfg, self.on_ha_event)
-        self.pair_code = secrets.token_hex(3).upper()
-        self.pair_expires = time.time() + 600
+        self.pair_code = ""
+        self.pair_expires = 0.0
+        self.new_pair_code()
         self.sockets: set[WebSocket] = set()
         self._send_sem = asyncio.Semaphore(_MAX_CONCURRENT_PUSHES)
         # Pending "end" tasks, keyed by (device, door), for the linger window.
@@ -95,6 +98,12 @@ class State:
         for task in list(self._live_end_tasks.values()):
             task.cancel()
         self._live_end_tasks.clear()
+
+    def new_pair_code(self) -> str:
+        """Mint a fresh, short-lived pairing code (at startup and on demand)."""
+        self.pair_code = secrets.token_hex(3).upper()
+        self.pair_expires = time.time() + _PAIR_TTL
+        return self.pair_code
 
     def pairing_allowed(self, client: str) -> bool:
         """Record a pairing attempt; False once the client is over the limit."""
@@ -478,8 +487,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         # The first device to pair owns the install; everyone after is a user.
         role = "owner" if not state.store.devices() else "user"
         state.store.add_device(device_id, str(payload.get("name") or "Enhet"), role)
-        state.pair_code = secrets.token_hex(3).upper()
-        state.pair_expires = time.time() + 600
+        # Rotate, and say so, so the log always shows the current code.
+        state.new_pair_code()
+        _LOGGER.info("Pairing code: %s (expires in 10 min)", state.pair_code)
         return {"device_token": device_id, "relay_id": "hemnyckel"}
 
     @api.post("/register")
@@ -516,6 +526,13 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         }
 
     # -- people (owner only) -------------------------------------------------
+    @api.post("/pair-code")
+    async def create_pair_code(_: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Mint a fresh pairing code (owner only), for inviting another device."""
+        code = state.new_pair_code()
+        _LOGGER.info("Pairing code: %s (expires in 10 min)", code)
+        return {"code": code, "expires_in": _PAIR_TTL}
+
     @api.get("/devices")
     async def list_devices(_: dict = Depends(require_owner)) -> dict[str, Any]:
         return {

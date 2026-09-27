@@ -118,6 +118,9 @@ POST /devices/<id>/role          # owner only
   { "role": "owner" | "user" }
   -> 200 { "ok": true }
   -> 409 the last owner cannot be demoted
+
+POST /pair-code                  # owner only; a fresh code for a new device
+  -> 200 { "code": "A1B2C3", "expires_in": 600 }
 ```
 
 `GET /state` also carries the caller's `role`, so the app can show only what it
