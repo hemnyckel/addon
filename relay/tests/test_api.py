@@ -240,9 +240,15 @@ def test_a_guest_schedule_is_enforced(cfg):
                             json={"code": invite["code"], "name": "Städ"}).json()["device_token"]
         assert hmk.store.device(token)["days"] == f"[{other}]"
 
-        # Today is not an allowed day, so the guest is refused right now.
-        assert client.get("/api/state",
-                          headers={"Authorization": f"Bearer {token}"}).status_code == 403
+        # Today is not an allowed day. The guest can read their state (so the app
+        # can explain), but acting is refused.
+        auth = {"Authorization": f"Bearer {token}"}
+        assert client.get("/api/state", headers=auth).status_code == 200
+        assert client.get("/api/state", headers=auth).json()["schedule"]["days"] == [other]
+        refused = client.post("/api/action", headers=auth,
+                              json={"door": "front", "action": "unlock"})
+        assert refused.status_code == 403
+        assert refused.json()["detail"] == "outside the guest's hours"
 
 
 def test_a_guest_time_window_is_enforced(cfg):
@@ -261,8 +267,10 @@ def test_a_guest_time_window_is_enforced(cfg):
         token = client.post("/api/pair",
                             json={"code": invite["code"], "name": "Städ"}).json()["device_token"]
 
-        assert client.get("/api/state",
-                          headers={"Authorization": f"Bearer {token}"}).status_code == 403
+        refused = client.post("/api/action", headers={"Authorization": f"Bearer {token}"},
+                              json={"door": "front", "action": "unlock"})
+        assert refused.status_code == 403
+        assert refused.json()["detail"] == "outside the guest's hours"
 
 
 def test_a_guest_invitation_restricts_the_device(cfg):

@@ -534,8 +534,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if device is None:
             raise HTTPException(401, "invalid device token")
         found = dict(device)
-        if _guest_expired(found) or not _schedule_ok(found, time.time()):
-            raise HTTPException(403, "guest access is not available right now")
+        if _guest_expired(found):
+            raise HTTPException(403, "guest access has expired")
         return found
 
     async def require_owner(device: dict = Depends(require_device)) -> dict:
@@ -637,10 +637,17 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         doors = [await state.door_state(d) for d in cfg.doors]
         role = device.get("role", "user")
         presence: dict[str, str] = {}
+        schedule = None
         if role == "guest":
             # Only their doors, and never who is home.
             allowed = _device_doors(device) or []
             doors = [d for d in doors if d["id"] in allowed]
+            schedule = {
+                "days": [int(d) for d in _json_list(device.get("days")) if str(d).isdigit()],
+                "from": device.get("from_time"),
+                "to": device.get("to_time"),
+                "until": device.get("expires"),
+            }
         else:
             presence = state.store.presence()
         home = state.store.setting("home")
@@ -651,6 +658,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "role": role,
             "device_id": device["id"],
             "expires": device.get("expires"),
+            "schedule": schedule,
             "home": json.loads(home) if home else None,
             "relay": {"online": True, "apns": state.apns.live},
         }
@@ -792,6 +800,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             allowed = _device_doors(device) or []
             if door_id not in allowed:
                 raise HTTPException(403, "not your door")
+            if not _schedule_ok(device, time.time()):
+                raise HTTPException(403, "outside the guest's hours")
         return await state.do_action(door_id, str(payload.get("action")), device)
 
     # -- live activities (Lock Screen / Dynamic Island) ---------------------
