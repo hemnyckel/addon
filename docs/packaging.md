@@ -46,7 +46,7 @@ Hemnyckel is three repositories, so each part has one home:
 |---|---|---|
 | This add-on (the relay) | `hemnyckel/addon` | public |
 | The lock integration | `hemnyckel/integration` | public (HACS requires it) |
-| The iOS app | `hemnyckel/ios` | private |
+| The Hemnyckel app (iPhone) | private source; TestFlight, then the App Store |
 
 **No Home Assistant credentials are configured.** The add-on declares
 `homeassistant_api: true`, and the supervisor injects `SUPERVISOR_TOKEN`, which
@@ -79,8 +79,7 @@ a hint, while the lock entity is the same door for good.
 
 ## The app goes in the App Store
 
-Source in `hemnyckel/ios` (**private**), generated with XcodeGen (no `.xcodeproj`
-in git). Versioned with `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`. TestFlight
+Its source is private and generated with XcodeGen (no `.xcodeproj` in git). Versioned with `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`. TestFlight
 for the family first, then the normal App Store flow. No account, no login:
 pairing is a **QR code** from an owner's device.
 

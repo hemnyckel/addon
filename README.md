@@ -17,16 +17,15 @@ No Home Assistant credentials are needed: the add-on gets them from the supervis
 
 ## The app is the point
 
-This add-on exists to feed **Hemnyckel**, the family's own iOS app: rich notifications with
-*who opened the door, when and how*, history, guests and lock control — with no Home Assistant
-app and no vendor app. The app is not in the App Store yet; it is heading for TestFlight, and
-the add-on collects and stores everything meanwhile, so nothing is lost while it is on its way.
+This add-on exists to feed **the Hemnyckel app** for iPhone: rich notifications with *who
+opened the door, when and how*, the history, the guests and lock control — with no Home
+Assistant app and no vendor app. The app is heading for TestFlight and then the App Store;
+while it is on its way this add-on collects and stores everything, so nothing is lost.
 
-| Part | Repository | |
+| Repository | What it holds | Install it with |
 |---|---|---|
-| The iOS app | `hemnyckel/ios` | private; TestFlight next |
-| The lock integration (local: ZHA, slots, journal) | [`hemnyckel/integration`](https://github.com/hemnyckel/integration) | HACS |
-| The relay (this add-on) | this repository | the add-on store |
+| [`hemnyckel/integration`](https://github.com/hemnyckel/integration) | the lock engine: ZHA, slots, journal | HACS |
+| this repository | the relay (the add-on) | the add-on store |
 
 The add-on's own documentation — options, doors, APNs setup, health — is in
 [`relay/README.md`](relay/README.md).

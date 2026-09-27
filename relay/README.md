@@ -1,5 +1,9 @@
 # Hemnyckel relay
 
+It feeds **the Hemnyckel app** for iPhone — the family's notifications with *who opened
+the door, when and how*, history and lock control. The app is heading for TestFlight;
+this add-on stores everything meanwhile.
+
 A small HTTPS service that runs in your home and turns local lock events into
 Apple push notifications — and forwards app actions back to Home Assistant.
 
