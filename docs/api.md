@@ -153,6 +153,26 @@ A guest device:
 - is **never notified** and registers no push tokens;
 - is refused entirely once `expires` has passed (403).
 
+## Presence
+
+Every phone watches a geofence around the house and reports when it comes and
+goes. That is what makes a departure real — an unlock is an immediate arrival,
+but only leaving the zone says someone is out (and an automatic relock is never
+a departure).
+
+```
+POST /presence            Authorization: Bearer <device_token>
+  { "state": "home" | "away" }
+  -> 200 { "ok": true }             # ignored when the device has no person
+
+POST /settings/home       # owner only, set once for the whole family
+  { "lat": 59.33, "lon": 18.06, "radius": 150 }
+  -> 200 { "ok": true, "radius": 150 }
+```
+
+`GET /state` returns `home`, so every phone configures the same zone, and
+`presence` merges the newest signal per person (a lock event or a report).
+
 ## Health
 
 ```

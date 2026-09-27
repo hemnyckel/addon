@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 
 from app.store import Store
 
@@ -126,3 +127,20 @@ def test_presence_follows_each_person_not_each_door(tmp_path):
 
     # Elise is still home: the automatic relock carries no person.
     assert store.presence() == {"Elise": "home", "Pappa": "away"}
+
+
+def test_presence_merges_lock_events_and_geofence_reports(tmp_path):
+    store = Store(str(tmp_path))
+    now = time.time()
+
+    # An unlock a while ago, then a geofence report just now: she has left.
+    store.add_event(event(1, id="a", person="Elise", action="unlock", ts=now - 600))
+    store.set_presence("Elise", "away")
+    assert store.presence()["Elise"] == "away"
+
+    # The other way round: a report, then a fresh unlock: he is home again.
+    store.add_event(event(2, id="b", person="Pappa", action="lock", ts=now - 600))
+    store.set_presence("Pappa", "away")
+    store._db.execute("UPDATE presence SET updated = ? WHERE person = 'Pappa'", (now - 300,))
+    store.add_event(event(3, id="c", person="Pappa", action="unlock", ts=now - 10))
+    assert store.presence()["Pappa"] == "home"

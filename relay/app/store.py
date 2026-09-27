@@ -52,6 +52,15 @@ class Store:
                 created REAL NOT NULL,
                 used_by TEXT
             );
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS presence (
+                person TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                updated REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS live_activities (
                 device TEXT NOT NULL,
                 door TEXT NOT NULL,
@@ -256,15 +265,43 @@ class Store:
         return None if row is None else _row(row)
 
     def presence(self) -> dict[str, str]:
-        """Each person's last known state, from their most recent event.
+        """Each person's last known state.
 
-        Per person, not per door: an automatic relock carries no person and must
-        never make someone disappear from the board.
+        Two signals, latest wins: a lock event attributed to them (an unlock is
+        an arrival, a lock a departure) and an explicit report from their phone
+        (the home geofence). Per person, so an automatic relock — which carries
+        no person — can never make someone disappear.
         """
-        rows = self._db.execute(
-            "SELECT person, action FROM events WHERE person IS NOT NULL ORDER BY ts ASC"
-        ).fetchall()
-        state: dict[str, str] = {}
-        for row in rows:
-            state[str(row["person"])] = "home" if row["action"] == "unlock" else "away"
-        return state
+        latest: dict[str, tuple[float, str]] = {}
+        for row in self._db.execute(
+            "SELECT person, action, ts FROM events WHERE person IS NOT NULL ORDER BY ts"
+        ):
+            latest[str(row["person"])] = (
+                float(row["ts"]),
+                "home" if row["action"] == "unlock" else "away",
+            )
+        for row in self._db.execute("SELECT person, state, updated FROM presence"):
+            person = str(row["person"])
+            ts = float(row["updated"])
+            if person not in latest or ts > latest[person][0]:
+                latest[person] = (ts, str(row["state"]))
+        return {person: state for person, (_, state) in latest.items()}
+
+    def set_presence(self, person: str, state: str) -> None:
+        self._db.execute(
+            "INSERT INTO presence (person, state, updated) VALUES (?, ?, ?) "
+            "ON CONFLICT(person) DO UPDATE SET state = excluded.state, updated = excluded.updated",
+            (person, state, time.time()),
+        )
+        self._db.commit()
+
+    # -- settings -----------------------------------------------------------
+    def set_setting(self, key: str, value: str) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value)
+        )
+        self._db.commit()
+
+    def setting(self, key: str) -> str | None:
+        row = self._db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row["value"])

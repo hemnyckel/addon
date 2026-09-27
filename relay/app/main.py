@@ -606,6 +606,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             doors = [d for d in doors if d["id"] in allowed]
         else:
             presence = state.store.presence()
+        home = state.store.setting("home")
         return {
             "doors": doors,
             "presence": presence,
@@ -613,10 +614,42 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "role": role,
             "device_id": device["id"],
             "expires": device.get("expires"),
+            "home": json.loads(home) if home else None,
             "relay": {"online": True, "apns": state.apns.live},
         }
 
     # -- people (owner only) -------------------------------------------------
+    @api.post("/presence")
+    async def report_presence(payload: dict[str, Any],
+                              device: dict = Depends(require_device)) -> dict[str, Any]:
+        """A phone reports whether it is at home (from the home geofence)."""
+        value = str(payload.get("state") or "")
+        if value not in ("home", "away"):
+            raise HTTPException(400, "state must be home or away")
+        person = device.get("person")
+        if device.get("role") == "guest" or not person:
+            return {"ok": True, "ignored": "no person"}
+        state.store.set_presence(str(person), value)
+        return {"ok": True}
+
+    @api.post("/settings/home")
+    async def set_home(payload: dict[str, Any],
+                       _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Where home is, for the phones' geofence (owner only)."""
+        try:
+            lat = float(payload["lat"])
+            lon = float(payload["lon"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "lat and lon are required") from None
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise HTTPException(400, "lat or lon out of range")
+        radius = max(100, min(int(payload.get("radius") or 150), 1000))
+        state.store.set_setting(
+            "home", json.dumps({"lat": lat, "lon": lon, "radius": radius})
+        )
+        _LOGGER.info("Home set to %.5f, %.5f (r=%d m)", lat, lon, radius)
+        return {"ok": True, "radius": radius}
+
     @api.post("/pair-code")
     async def create_pair_code(_: dict = Depends(require_owner)) -> dict[str, Any]:
         """Mint a fresh pairing code (owner only), for inviting another device."""

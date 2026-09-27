@@ -157,6 +157,48 @@ def two_door_cfg(cfg):
     return cfg
 
 
+def test_a_phone_reports_presence_and_the_owner_sets_home(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+
+        # Without a person the report is ignored, not an error.
+        assert client.post("/api/presence", headers=owner,
+                           json={"state": "home"}).json() == {"ok": True, "ignored": "no person"}
+
+        client.post("/api/register", headers=owner, json={"apns_token": "", "person": "Claes"})
+        assert client.post("/api/presence", headers=owner,
+                           json={"state": "away"}).json() == {"ok": True}
+        assert hmk.store.presence().get("Claes") == "away"
+        assert client.post("/api/presence", headers=owner,
+                           json={"state": "maybe"}).status_code == 400
+
+        # The owner sets home; every device gets it with its state.
+        assert client.post("/api/settings/home", headers=owner,
+                           json={"lat": 59.33, "lon": 18.06, "radius": 150}
+                           ).json() == {"ok": True, "radius": 150}
+        assert client.get("/api/state", headers=owner).json()["home"] == {
+            "lat": 59.33, "lon": 18.06, "radius": 150,
+        }
+
+
+def test_only_the_owner_sets_home(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "O"}).json()["device_token"]}
+        user = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "U"}).json()["device_token"]}
+
+        assert client.post("/api/settings/home", headers=user,
+                           json={"lat": 1, "lon": 2}).status_code == 403
+        assert client.post("/api/settings/home", headers=owner,
+                           json={"lat": 999, "lon": 2}).status_code == 400
+
+
 def test_a_guest_invitation_restricts_the_device(cfg):
     app = create_app(two_door_cfg(cfg))
     with TestClient(app) as client:
