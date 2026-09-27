@@ -308,6 +308,33 @@ def test_people_group_devices_and_set_a_role_once(cfg):
                            json={"role": "user"}).json() == {"ok": True}
 
 
+def test_re_pairing_the_same_phone_replaces_its_old_row(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Pappas iPhone"}).json()["device_token"]}
+        device = {"model": "iPhone", "os": "iOS 26.0"}
+        client.post("/api/register", headers=owner,
+                    json={"apns_token": "", "person": "Pappa", "device": device})
+
+        # The same phone pairs again (a reinstall, a re-connect).
+        invite = client.post("/api/invites", headers=owner,
+                             json={"role": "user", "expires_at": time.time() + 3600}).json()
+        again = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": invite["code"], "name": "Pappas iPhone"}).json()["device_token"]}
+        client.post("/api/register", headers=again,
+                    json={"apns_token": "", "person": "Pappa", "device": device})
+
+        people = client.get("/api/people", headers=again).json()["people"]
+        pappa = next(p for p in people if p["name"] == "Pappa")
+        assert len(pappa["devices"]) == 1                      # replaced, not added
+        assert pappa["role"] == "owner"                        # the role survived
+        assert pappa["devices"][0]["id"] == again["Authorization"].removeprefix("Bearer ")
+        # …and the replaced device's token is gone with it.
+        assert client.get("/api/state", headers=owner).status_code == 401
+
+
 def test_a_nameless_family_invitation_is_fine(cfg):
     app = create_app(cfg)
     with TestClient(app) as client:

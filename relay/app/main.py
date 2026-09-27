@@ -631,6 +631,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             str(info.get("model") or "") or None,
             str(info.get("os") or "") or None,
         )
+        # A re-paired phone replaces its older row rather than adding one.
+        state.store.replace_duplicates(device["id"])
         return {"ok": True}
 
     @api.get("/events")

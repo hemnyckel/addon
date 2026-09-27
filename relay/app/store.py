@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
 from typing import Any
+
+_LOGGER = logging.getLogger("hemnyckel.store")
 
 
 def _row(row: sqlite3.Row) -> dict[str, Any]:
@@ -177,6 +180,29 @@ class Store:
         """A role belongs to the person, not to each of their phones."""
         self._db.execute("UPDATE devices SET role = ? WHERE person = ?", (role, person))
         self._db.commit()
+
+    def replace_duplicates(self, device_id: str) -> None:
+        """Drop older rows that are the same phone re-paired.
+
+        Matched on name, model and person together, so two family members whose
+        phones share a default name are never confused. An owner role is carried
+        over to the surviving device.
+        """
+        row = self.device(device_id)
+        if row is None or not row["device_model"] or not row["person"]:
+            return
+        duplicates = self._db.execute(
+            "SELECT id, role FROM devices "
+            "WHERE id != ? AND name = ? AND device_model = ? AND person = ?",
+            (device_id, row["name"], row["device_model"], row["person"]),
+        ).fetchall()
+        if not duplicates:
+            return
+        if any(duplicate["role"] == "owner" for duplicate in duplicates):
+            self.set_role(device_id, "owner")
+        for duplicate in duplicates:
+            self.remove_device(duplicate["id"])
+        _LOGGER.info("replaced %d older row(s) for %s", len(duplicates), row["name"])
 
     def person_exists(self, person: str) -> bool:
         row = self._db.execute(
