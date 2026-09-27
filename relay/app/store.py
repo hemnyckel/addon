@@ -254,3 +254,17 @@ class Store:
             "SELECT * FROM events WHERE door = ? ORDER BY ts DESC LIMIT 1", (door,)
         ).fetchone()
         return None if row is None else _row(row)
+
+    def presence(self) -> dict[str, str]:
+        """Each person's last known state, from their most recent event.
+
+        Per person, not per door: an automatic relock carries no person and must
+        never make someone disappear from the board.
+        """
+        rows = self._db.execute(
+            "SELECT person, action FROM events WHERE person IS NOT NULL ORDER BY ts ASC"
+        ).fetchall()
+        state: dict[str, str] = {}
+        for row in rows:
+            state[str(row["person"])] = "home" if row["action"] == "unlock" else "away"
+        return state

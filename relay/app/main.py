@@ -605,10 +605,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             allowed = _device_doors(device) or []
             doors = [d for d in doors if d["id"] in allowed]
         else:
-            for d in cfg.doors:
-                ev = state.store.last_event(d.id)
-                if ev and ev.get("person"):
-                    presence[ev["person"]] = "home" if ev["action"] == "unlock" else "away"
+            presence = state.store.presence()
         return {
             "doors": doors,
             "presence": presence,

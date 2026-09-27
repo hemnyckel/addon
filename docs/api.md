@@ -58,9 +58,14 @@ GET /state
       "doors": [ { "id":"front","name":"...","locked":true,"open":false,
                    "battery":92,"last_event":Event } ],
       "presence": { "claes":"home", "anna":"away" },
+      "role": "owner", "device_id": "...", "expires": null,
       "relay": { "online": true, "apns": true }
     }
 ```
+
+`presence` is per **person**, from each person's most recent attributed event —
+an automatic relock carries no person, so it never makes someone vanish from the
+board. It is empty for a guest.
 
 ## Actions
 

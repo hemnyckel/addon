@@ -115,3 +115,14 @@ def test_role_defaults_and_owner_bootstrap(tmp_path):
 
     store.ensure_owner()  # idempotent
     assert store.owner_count() == 1
+
+
+def test_presence_follows_each_person_not_each_door(tmp_path):
+    store = Store(str(tmp_path))
+    store.add_event(event(1, id="a", door="front", person="Elise", action="unlock"))
+    store.add_event(event(2, id="b", door="front", person=None, action="lock"))  # auto
+    store.add_event(event(3, id="c", door="back", person="Pappa", action="unlock"))
+    store.add_event(event(4, id="d", door="back", person="Pappa", action="lock"))
+
+    # Elise is still home: the automatic relock carries no person.
+    assert store.presence() == {"Elise": "home", "Pappa": "away"}
