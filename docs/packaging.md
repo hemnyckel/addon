@@ -74,8 +74,10 @@ than a deletion. The full project stays recoverable from the tags (`v1.0.14` is
 the last complete state).
 
 The relay depends on two things from the integration, so they are part of its
-version requirement: the `hemnyckel_door_event` event, and `entry_id` on each
-journal entry (so doors can be told apart).
+version requirement: the `hemnyckel_door_event` event, and a stable door key
+on it. That key is the **lock entity** (`lock.ytterdorren`): the config entry
+id is re-minted whenever the integration re-creates its entry, so it is only
+a hint, while the lock entity is the same door for good.
 
 ## The app goes in the App Store
 

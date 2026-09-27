@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 
 from app.apns import PushResult
+from app.config import Config, Door
 from app.main import State
 
 from .conftest import DEVICE_TOKEN
@@ -515,3 +516,40 @@ def test_auto_relock_is_classified_end_to_end(cfg):
     assert stored["source"] == "auto"
     assert stored["method"] == "Automatiskt"
     assert stored["person"] is None
+
+
+def test_a_recreated_entry_id_still_reaches_the_right_door(tmp_path, apns_key):
+    """A config entry id is re-minted whenever the integration re-creates it.
+
+    It is only a hint, so a driver whose id we no longer know must still land on
+    its door through the lock entity - in a house with two doors the event would
+    otherwise be dropped silently.
+    """
+    path, _ = apns_key
+    cfg = Config(
+        apns_key_path=path,
+        apns_key_id="ABC123DEFG",
+        apns_team_id="TEAM123456",
+        bundle_id="se.hemnyckel.app",
+        data_dir=str(tmp_path / "data"),
+        doors=[
+            Door(id="front", name="Ytterdörren", lock_entity="lock.front", entry_id="gone"),
+            Door(id="back", name="Källardörren", lock_entity="lock.back", entry_id="gone"),
+        ],
+    )
+    state = make_state(cfg)
+    event = {
+        "event_type": "hemnyckel_door_event",
+        "data": {
+            "action": "unlock",
+            "source": "keypad",
+            "time": 1700000000,
+            "entry_id": "brand-new-id",
+            "lock": "lock.back",
+        },
+    }
+
+    asyncio.run(state.on_ha_event(event))
+
+    assert state.store.last_event("back") is not None
+    assert state.store.last_event("front") is None

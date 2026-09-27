@@ -60,6 +60,12 @@ def from_journal(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
     entry_id = str(entry.get("entry_id") or data.get("entry_id") or "")
     door = cfg.door_by_entry(entry_id) if entry_id else None
     if door is None:
+        # A config entry id is re-minted whenever the integration re-creates its
+        # entry, so it is only a hint. The lock entity is the same door for good.
+        lock = str(entry.get("lock") or data.get("lock") or "")
+        if lock:
+            door = cfg.door_by_lock_entity(lock)
+    if door is None:
         door = cfg.doors[0] if len(cfg.doors) == 1 else None
     if door is None:
         return None
