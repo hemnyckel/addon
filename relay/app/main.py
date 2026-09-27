@@ -45,6 +45,10 @@ _LIVE_LINGER = 60
 _ATTRIBUTION_TTL = 20
 # Method text shown for an action the app caused.
 _APP_METHOD = "App"
+# A lock with no attribution that follows an unlock within this window is the
+# lock's own auto-relock (the lock reports it as "unattributed", like any other).
+_AUTO_RELOCK_WINDOW = 30
+_AUTO_METHOD = "Automatiskt"
 # Upper bound on concurrent pushes, so a busy household can't open thousands
 # of connections at once.
 _MAX_CONCURRENT_PUSHES = 16
@@ -74,6 +78,8 @@ class State:
         # Recent app-initiated actions, keyed by (door, action), so the lock's
         # own unattributed report can be credited to whoever pressed the button.
         self._pending_attributions: dict[tuple[str, str], dict[str, Any]] = {}
+        # When each door was last unlocked, to recognise its automatic relock.
+        self._last_unlock: dict[str, float] = {}
 
     def cancel_live_ends(self) -> None:
         for task in list(self._live_end_tasks.values()):
@@ -87,6 +93,8 @@ class State:
             if mapped is None:
                 return
             self._attribute(mapped)
+            self._classify_auto_relock(mapped)
+            self._track_unlock(mapped)
             self.store.add_event(mapped)
             await self.broadcast(mapped)
             await self.notify(mapped)
@@ -122,6 +130,26 @@ class State:
             ev["person"] = pending["person"]
         ev["source"] = "app"
         ev["method"] = _APP_METHOD
+
+    def _classify_auto_relock(self, ev: dict[str, Any]) -> None:
+        """Recognise a door's own auto-relock.
+
+        The lock reports it as "unattributed", exactly like a manual lock, so it
+        is inferred: a lock with no attribution of its own, on a door that was
+        unlocked a moment ago, is the lock closing itself. Labelled "auto" so it
+        reads "Automatiskt" in history and never notifies.
+        """
+        if ev.get("action") != "lock" or ev.get("source") != "unattributed":
+            return
+        unlocked_at = self._last_unlock.get(ev["door"])
+        if unlocked_at is None or ev["ts"] - unlocked_at > _AUTO_RELOCK_WINDOW:
+            return
+        ev["source"] = "auto"
+        ev["method"] = _AUTO_METHOD
+
+    def _track_unlock(self, ev: dict[str, Any]) -> None:
+        if ev.get("action") == "unlock":
+            self._last_unlock[ev["door"]] = ev["ts"]
 
     # -- push ----------------------------------------------------------------
     def _payload(self, ev: dict[str, Any], door: Door) -> dict[str, Any]:

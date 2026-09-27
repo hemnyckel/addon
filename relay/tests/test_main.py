@@ -340,3 +340,78 @@ def test_a_zigbee_journal_entry_is_attributed_end_to_end(cfg):
     assert stored["source"] == "app"
     assert stored["method"] == "App"
     assert stored["person"] == "claes"
+
+
+# -- auto-relock: the lock closing itself ------------------------------------
+
+def test_a_lock_shortly_after_an_unlock_is_an_auto_relock(cfg):
+    state = make_state(cfg)
+    state._track_unlock({**UNLOCK, "ts": 1000.0})
+    lock = {**UNATTRIBUTED, "action": "lock", "ts": 1007.0}
+
+    state._classify_auto_relock(lock)
+
+    assert lock["source"] == "auto"
+    assert lock["method"] == "Automatiskt"
+
+
+def test_a_late_lock_is_not_an_auto_relock(cfg):
+    state = make_state(cfg)
+    state._track_unlock({**UNLOCK, "ts": 1000.0})
+    lock = {**UNATTRIBUTED, "action": "lock", "ts": 1000.0 + 3600}
+
+    state._classify_auto_relock(lock)
+
+    assert lock["source"] == "unattributed"
+
+
+def test_an_app_lock_is_never_labelled_auto(cfg):
+    state = make_state(cfg)
+    state._track_unlock({**UNLOCK, "ts": 1000.0})
+    state.note_app_action("front", "lock", {"id": "d1", "name": "x", "person": "claes"})
+    lock = {**UNATTRIBUTED, "action": "lock", "ts": 1002.0}
+
+    state._attribute(lock)
+    state._classify_auto_relock(lock)
+
+    assert lock["source"] == "app"
+
+
+def test_a_physical_lock_is_not_touched_by_the_auto_rule(cfg):
+    state = make_state(cfg)
+    state._track_unlock({**UNLOCK, "ts": 1000.0})
+    lock = {**UNLOCK, "action": "lock", "source": "keypad", "person": "Elise",
+            "method": "Kod", "ts": 1005.0}
+
+    state._classify_auto_relock(lock)
+
+    assert lock["source"] == "keypad"
+    assert lock["person"] == "Elise"
+
+
+def test_an_auto_relock_never_notifies(cfg):
+    state = make_state(cfg)
+    state.store.add_device("d1", "iPhone")
+    state.store.set_apns("d1", DEVICE_TOKEN, "claes", {}, "production")
+    auto = {**UNLOCK, "action": "lock", "source": "auto", "method": "Automatiskt", "person": None}
+
+    asyncio.run(state.notify(auto))
+
+    assert state.apns.sent == []
+
+
+def test_auto_relock_is_classified_end_to_end(cfg):
+    state = make_state(cfg)
+    unlock = {"event_type": "nimly_journal_entry",
+              "data": {"entry": {"action": "unlock", "source": "keypad", "name": "Elise",
+                                 "time": 1700000000}}}
+    lock = {"event_type": "nimly_journal_entry",
+            "data": {"entry": {"action": "lock", "source": "unattributed", "time": 1700000007}}}
+
+    asyncio.run(state.on_ha_event(unlock))
+    asyncio.run(state.on_ha_event(lock))
+
+    stored = state.store.last_event("front")
+    assert stored["source"] == "auto"
+    assert stored["method"] == "Automatiskt"
+    assert stored["person"] is None
