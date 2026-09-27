@@ -332,7 +332,7 @@ def test_a_zigbee_journal_entry_is_attributed_end_to_end(cfg):
     state = make_state(cfg)
     state.note_app_action("front", "unlock", {"id": "d1", "name": "x", "person": "claes"})
     journal = {
-        "event_type": "nimly_journal_entry",
+        "event_type": "hemnyckel_door_event",
         "data": {"entry": {"action": "unlock", "source": "zigbee", "time": 1700000000}},
     }
 
@@ -502,10 +502,10 @@ def test_a_redundant_unlock_never_notifies(cfg):
 
 def test_auto_relock_is_classified_end_to_end(cfg):
     state = make_state(cfg)
-    unlock = {"event_type": "nimly_journal_entry",
+    unlock = {"event_type": "hemnyckel_door_event",
               "data": {"entry": {"action": "unlock", "source": "keypad", "name": "Elise",
                                  "time": 1700000000}}}
-    lock = {"event_type": "nimly_journal_entry",
+    lock = {"event_type": "hemnyckel_door_event",
             "data": {"entry": {"action": "lock", "source": "unattributed", "time": 1700000007}}}
 
     asyncio.run(state.on_ha_event(unlock))

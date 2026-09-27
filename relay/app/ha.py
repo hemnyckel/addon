@@ -60,7 +60,7 @@ class HaClient:
             await ws.send(
                 json.dumps(
                     {"id": 1, "type": "subscribe_events",
-                     "event_type": "nimly_journal_entry"}
+                     "event_type": "hemnyckel_door_event"}
                 )
             )
             await ws.send(

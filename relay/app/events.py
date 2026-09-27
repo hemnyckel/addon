@@ -2,7 +2,7 @@
 
 Two sources:
 
-* ``nimly_journal_entry`` - fired by the lock integration; already attributed
+* ``hemnyckel_door_event`` - fired by the lock integration; already attributed
   (person, slot, method). This is the rich source.
 * ``state_changed`` on a lock entity - a fallback for lock/unlock with no
   attribution ("unattributed").
@@ -111,6 +111,6 @@ def from_ha(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
     # The integration's journal is the attributed source of truth (who / when /
     # how). Lock state changes are read live via the state endpoint, not turned
     # into events, so one physical action yields exactly one notification.
-    if event.get("event_type") == "nimly_journal_entry":
+    if event.get("event_type") == "hemnyckel_door_event":
         return from_journal(cfg, event)
     return None

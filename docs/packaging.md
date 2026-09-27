@@ -58,21 +58,23 @@ offers the update to every installation.
 
 ## The integration is a HACS repository
 
-The lock integration lives at **`hemnyckel/integration`** (the `nimly` project,
-renamed and trimmed) with `hacs.json`, semantic git tags and release notes. The
+The lock integration lives at **`hemnyckel/integration`** — Hemnyckel's own
+integration, the `nimly` project renamed, with the domain `hemnyckel` with `hacs.json`, semantic git tags and release notes. The
 family installs it through **HACS → custom repository**, and updates arrive like
 any other HACS integration.
 
 The integration keeps **only the local half**: ZHA control, slot and credential
 management (PIN, RFID, fingerprint, enrollment, slot names), the guest-code
-services and the **journal** the relay reads. The **vendor cloud** and the
-**bridge emulator** (the `cloud/` layer, the ESP32 bridge and its provisioning)
-are gone from this build. The full project — bridge, emulator, vendor-app
-coexistence — stays recoverable from the tags (`v1.0.14` is the last complete
-state), since the two projects have different purposes.
+services and the **journal** the relay reads. The **vendor cloud is gone**
+(v2.0.0). The **bridge and the emulator** — the parts that keep the vendor app
+in sync — are retired and are removed in the next release (v2.1), as a separate
+deliberate change: they sit inside the mirror engine itself (MQTT, the channel
+system, the emulator entities), so they are a rework of the local engine rather
+than a deletion. The full project stays recoverable from the tags (`v1.0.14` is
+the last complete state).
 
 The relay depends on two things from the integration, so they are part of its
-version requirement: the `nimly_journal_entry` event, and `entry_id` on each
+version requirement: the `hemnyckel_door_event` event, and `entry_id` on each
 journal entry (so doors can be told apart).
 
 ## The app goes in the App Store

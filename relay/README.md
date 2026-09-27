@@ -5,7 +5,7 @@ Apple push notifications — and forwards app actions back to Home Assistant.
 
 ## What it does
 
-- Subscribes to Home Assistant events (`nimly_journal_entry` + lock
+- Subscribes to Home Assistant events (`hemnyckel_door_event` + lock
   `state_changed`).
 - Maps them to Hemnyckel events (who / when / how / which door).
 - Sends APNs pushes (rich, with Lock/Unlock actions) to paired devices.

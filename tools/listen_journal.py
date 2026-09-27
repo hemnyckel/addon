@@ -1,4 +1,4 @@
-"""Development tool: print raw nimly_journal_entry and lock state_changed events.
+"""Development tool: print raw hemnyckel_door_event and lock state_changed events.
 
 Usage (from the relay directory, with the relay venv):
 
@@ -22,14 +22,14 @@ async def main() -> None:
         await ws.recv()
         await ws.send(json.dumps({"type": "auth", "access_token": token}))
         print("auth:", json.loads(await ws.recv()).get("type"), flush=True)
-        await ws.send(json.dumps({"id": 1, "type": "subscribe_events", "event_type": "nimly_journal_entry"}))
+        await ws.send(json.dumps({"id": 1, "type": "subscribe_events", "event_type": "hemnyckel_door_event"}))
         await ws.send(json.dumps({"id": 2, "type": "subscribe_events", "event_type": "state_changed"}))
         async for raw in ws:
             msg = json.loads(raw)
             if msg.get("type") != "event":
                 continue
             ev = msg["event"]
-            if ev.get("event_type") == "nimly_journal_entry":
+            if ev.get("event_type") == "hemnyckel_door_event":
                 print("JOURNAL:", json.dumps(ev.get("data"), ensure_ascii=False), flush=True)
             else:
                 data = ev.get("data", {})
