@@ -100,6 +100,16 @@ def load_config() -> Config:
     def pick(env: str, key: str, default: str = "") -> str:
         return os.environ.get(env) or str(opts.get(key) or default)
 
+    # Inside a Home Assistant add-on the supervisor injects a token and proxies
+    # core: the relay needs no Home Assistant credentials of its own.
+    supervisor = os.environ.get("SUPERVISOR_TOKEN", "").strip()
+    ha_url = pick("HEMNYCKEL_HA_URL", "ha_url").rstrip("/")
+    ha_token = pick("HEMNYCKEL_HA_TOKEN", "ha_token")
+    if not ha_url and supervisor:
+        ha_url = "http://supervisor/core"
+    if not ha_token and supervisor:
+        ha_token = supervisor
+
     doors: list[Door] = []
     raw = os.environ.get("HEMNYCKEL_DOORS") or opts.get("doors") or "[]"
     if not isinstance(raw, str):
@@ -111,8 +121,8 @@ def load_config() -> Config:
     except (ValueError, TypeError):
         doors = []
     return Config(
-        ha_url=pick("HEMNYCKEL_HA_URL", "ha_url").rstrip("/"),
-        ha_token=pick("HEMNYCKEL_HA_TOKEN", "ha_token"),
+        ha_url=ha_url,
+        ha_token=ha_token,
         apns_key_path=pick("HEMNYCKEL_APNS_KEY", "apns_key"),
         apns_key_id=pick("HEMNYCKEL_APNS_KEY_ID", "apns_key_id"),
         apns_team_id=pick("HEMNYCKEL_APNS_TEAM_ID", "apns_team_id"),

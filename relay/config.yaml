@@ -1,8 +1,8 @@
-name: "Hemnyckel relay"
+name: "Hemnyckel"
 version: "0.1.0"
 slug: "hemnyckel"
-description: "Local push relay for the Hemnyckel iOS app: lock events to Apple push, and app actions back to Home Assistant."
-url: "https://github.com/your-user/hemnyckel"
+description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
+url: "https://github.com/c14ym0re/hemnyckel"
 arch:
   - aarch64
   - amd64
@@ -10,6 +10,9 @@ arch:
 startup: application
 boot: auto
 init: false
+# Talk to Home Assistant through the supervisor, which injects the token: the
+# add-on needs no Home Assistant credentials at all.
+homeassistant_api: true
 map:
   - data:rw
 options:
