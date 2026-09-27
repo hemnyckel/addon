@@ -40,6 +40,9 @@ class Store:
                 live_start_token TEXT,
                 role TEXT NOT NULL DEFAULT 'user',
                 doors TEXT,
+                days TEXT,
+                from_time TEXT,
+                to_time TEXT,
                 expires REAL,
                 prefs TEXT NOT NULL DEFAULT '{}',
                 created REAL NOT NULL
@@ -47,7 +50,11 @@ class Store:
             CREATE TABLE IF NOT EXISTS invites (
                 code TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'guest',
                 doors TEXT,
+                days TEXT,
+                from_time TEXT,
+                to_time TEXT,
                 expires REAL NOT NULL,
                 created REAL NOT NULL,
                 used_by TEXT
@@ -96,6 +103,21 @@ class Store:
             self._db.execute("ALTER TABLE devices ADD COLUMN doors TEXT")
         if "expires" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN expires REAL")
+        if "days" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN days TEXT")
+        if "from_time" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN from_time TEXT")
+        if "to_time" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN to_time TEXT")
+        invite_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(invites)")}
+        for column, ddl in (
+            ("role", "ALTER TABLE invites ADD COLUMN role TEXT NOT NULL DEFAULT 'guest'"),
+            ("days", "ALTER TABLE invites ADD COLUMN days TEXT"),
+            ("from_time", "ALTER TABLE invites ADD COLUMN from_time TEXT"),
+            ("to_time", "ALTER TABLE invites ADD COLUMN to_time TEXT"),
+        ):
+            if column not in invite_columns:
+                self._db.execute(ddl)
         self._db.commit()
 
     # -- devices ------------------------------------------------------------
@@ -112,19 +134,31 @@ class Store:
 
     def add_guest(self, device_id: str, name: str, doors: list[str],
                   expires: float) -> None:
+        self.add_invited(device_id, name, "guest", doors, [], None, None, expires)
+
+    def add_invited(self, device_id: str, name: str, role: str, doors: list[str],
+                    days: list[int], from_time: str | None, to_time: str | None,
+                    expires: float | None) -> None:
+        """A device created from an owner's invitation (a family member or guest)."""
         self._db.execute(
-            "INSERT OR REPLACE INTO devices (id, name, role, doors, expires, created) "
-            "VALUES (?, ?, 'guest', ?, ?, ?)",
-            (device_id, name, json.dumps(doors), expires, time.time()),
+            "INSERT OR REPLACE INTO devices "
+            "(id, name, role, doors, days, from_time, to_time, expires, created) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (device_id, name, role, json.dumps(doors), json.dumps(days),
+             from_time, to_time, expires, time.time()),
         )
         self._db.commit()
 
-    # -- invitations (a guest is created by the owner in advance) ------------
-    def add_invite(self, code: str, name: str, doors: list[str], expires: float) -> None:
+    # -- invitations (a device is created by the owner in advance) -----------
+    def add_invite(self, code: str, name: str, role: str, doors: list[str],
+                   days: list[int], from_time: str | None, to_time: str | None,
+                   expires: float) -> None:
         self._db.execute(
-            "INSERT OR REPLACE INTO invites (code, name, doors, expires, created) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (code, name, json.dumps(doors), expires, time.time()),
+            "INSERT OR REPLACE INTO invites "
+            "(code, name, role, doors, days, from_time, to_time, expires, created) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (code, name, role, json.dumps(doors), json.dumps(days),
+             from_time, to_time, expires, time.time()),
         )
         self._db.commit()
 

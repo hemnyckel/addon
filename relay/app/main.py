@@ -89,6 +89,32 @@ def _guest_expired(device: dict[str, Any]) -> bool:
                 and time.time() > float(expires))
 
 
+def _json_list(raw: Any) -> list:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _schedule_ok(device: dict[str, Any], when: float) -> bool:
+    """A guest's access window: chosen weekdays and times (empty means any)."""
+    if device.get("role") != "guest":
+        return True
+    local = time.localtime(when)
+    days = [int(d) for d in _json_list(device.get("days")) if str(d).isdigit()]
+    if days and (local.tm_wday + 1) not in days:  # ISO weekday, Monday = 1
+        return False
+    start = _parse_hhmm(str(device.get("from_time") or ""))
+    end = _parse_hhmm(str(device.get("to_time") or ""))
+    if start is None or end is None or start == end:
+        return True
+    now = local.tm_hour * 60 + local.tm_min
+    return start <= now < end if start < end else (now >= start or now < end)
+
+
 def _parse_hhmm(value: str) -> int | None:
     try:
         hour, minute = value.split(":")
@@ -508,8 +534,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if device is None:
             raise HTTPException(401, "invalid device token")
         found = dict(device)
-        if _guest_expired(found):
-            raise HTTPException(403, "guest access has expired")
+        if _guest_expired(found) or not _schedule_ok(found, time.time()):
+            raise HTTPException(403, "guest access is not available right now")
         return found
 
     async def require_owner(device: dict = Depends(require_device)) -> dict:
@@ -559,10 +585,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         invite = state.store.invite(code)
         if invite is not None and not invite["used_by"] and time.time() <= invite["expires"]:
             device_id = uuid.uuid4().hex
-            doors = [str(d) for d in json.loads(invite["doors"] or "[]")]
-            state.store.add_guest(device_id, invite["name"], doors, invite["expires"])
+            role = str(invite["role"] or "guest")
+            state.store.add_invited(
+                device_id,
+                invite["name"],
+                role,
+                [str(d) for d in _json_list(invite["doors"])],
+                [int(d) for d in _json_list(invite["days"]) if str(d).isdigit()],
+                invite["from_time"],
+                invite["to_time"],
+                # A family member is permanent; the code's expiry is not theirs.
+                None if role == "user" else float(invite["expires"]),
+            )
             state.store.use_invite(code, device_id)
-            _LOGGER.info("Guest %s paired (doors=%s)", invite["name"], doors)
+            _LOGGER.info("%s '%s' paired", role, invite["name"])
             return {"device_token": device_id, "relay_id": "hemnyckel"}
 
         if code != state.pair_code or time.time() > state.pair_expires:
@@ -667,7 +703,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                     "name": d["name"],
                     "person": d["person"],
                     "role": d["role"],
-                    "doors": json.loads(d["doors"]) if d["doors"] else None,
+                    "doors": _json_list(d["doors"]) or None,
+                    "days": _json_list(d["days"]) or None,
+                    "from_time": d["from_time"],
+                    "to_time": d["to_time"],
                     "expires": d["expires"],
                     "created": d["created"],
                 }
@@ -678,19 +717,43 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @api.post("/invites")
     async def create_invite(payload: dict[str, Any],
                             _: dict = Depends(require_owner)) -> dict[str, Any]:
-        """Create a guest invitation: a name, some doors, and a window."""
-        name = str(payload.get("name") or "Gäst").strip() or "Gäst"
-        doors = [str(d) for d in (payload.get("doors") or [])
-                 if cfg.door(str(d)) is not None]
-        if not doors:
-            raise HTTPException(400, "choose at least one door")
-        minutes = int(payload.get("expires_in_minutes") or 240)
-        minutes = max(5, min(minutes, 60 * 24 * 30))
-        expires = time.time() + minutes * 60
+        """Invite a family member (permanent) or a guest (doors, days, times)."""
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "a name is required")
+        role = str(payload.get("role") or "guest").lower()
+        if role not in ("user", "guest"):
+            raise HTTPException(400, "role must be user or guest")
+
+        doors: list[str] = []
+        days: list[int] = []
+        from_time = to_time = None
+        if role == "guest":
+            doors = [str(d) for d in (payload.get("doors") or [])
+                     if cfg.door(str(d)) is not None]
+            if not doors:
+                raise HTTPException(400, "choose at least one door")
+            days = sorted({int(d) for d in (payload.get("days") or [])
+                           if str(d).isdigit() and 1 <= int(d) <= 7})
+            from_time = str(payload.get("from_time") or "") or None
+            to_time = str(payload.get("to_time") or "") or None
+            if (from_time and _parse_hhmm(from_time) is None) or \
+                    (to_time and _parse_hhmm(to_time) is None):
+                raise HTTPException(400, "times must be HH:MM")
+
+        try:
+            expires = float(payload["expires_at"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "expires_at is required") from None
+        now = time.time()
+        if not now < expires <= now + 366 * 86400:
+            raise HTTPException(400, "expires_at must be within the next year")
+
         code = secrets.token_hex(3).upper()
-        state.store.add_invite(code, name, doors, expires)
-        _LOGGER.info("Guest invite for %s: %s (doors=%s, %d min)", name, code, doors, minutes)
-        return {"code": code, "expires_at": expires, "doors": doors}
+        state.store.add_invite(code, name, role, doors, days, from_time, to_time, expires)
+        _LOGGER.info("Invite for %s (%s): %s", name, role, code)
+        return {"code": code, "role": role, "expires_at": expires,
+                "doors": doors, "days": days}
 
     @api.delete("/devices/{device_id}")
     async def revoke_device(device_id: str,

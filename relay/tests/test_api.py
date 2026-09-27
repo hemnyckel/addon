@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -199,6 +200,70 @@ def test_only_the_owner_sets_home(cfg):
                            json={"lat": 999, "lon": 2}).status_code == 400
 
 
+def test_a_family_member_invitation_makes_a_user(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+
+        invite = client.post("/api/invites", headers=owner, json={
+            "name": "Elsa", "role": "user", "expires_at": time.time() + 3600,
+        }).json()
+        assert invite["role"] == "user"
+
+        token = client.post("/api/pair",
+                            json={"code": invite["code"], "name": "Elsas iPhone"}).json()["device_token"]
+        row = hmk.store.device(token)
+        assert row["role"] == "user"
+        assert row["name"] == "Elsa"          # the invitation names the person
+        assert not row["expires"]             # permanent
+        assert client.get("/api/state",
+                          headers={"Authorization": f"Bearer {token}"}).json()["role"] == "user"
+
+
+def test_a_guest_schedule_is_enforced(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+
+        today = time.localtime().tm_wday + 1          # ISO weekday
+        other = 1 if today != 1 else 2
+        invite = client.post("/api/invites", headers=owner, json={
+            "name": "Städ", "role": "guest", "doors": ["front"],
+            "days": [other], "expires_at": time.time() + 3600,
+        }).json()
+        token = client.post("/api/pair",
+                            json={"code": invite["code"], "name": "Städ"}).json()["device_token"]
+        assert hmk.store.device(token)["days"] == f"[{other}]"
+
+        # Today is not an allowed day, so the guest is refused right now.
+        assert client.get("/api/state",
+                          headers={"Authorization": f"Bearer {token}"}).status_code == 403
+
+
+def test_a_guest_time_window_is_enforced(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+
+        later = datetime.now() + timedelta(hours=3)
+        invite = client.post("/api/invites", headers=owner, json={
+            "name": "Städ", "role": "guest", "doors": ["front"],
+            "from_time": later.strftime("%H:00"), "to_time": later.strftime("%H:01"),
+            "expires_at": time.time() + 3600,
+        }).json()
+        token = client.post("/api/pair",
+                            json={"code": invite["code"], "name": "Städ"}).json()["device_token"]
+
+        assert client.get("/api/state",
+                          headers={"Authorization": f"Bearer {token}"}).status_code == 403
+
+
 def test_a_guest_invitation_restricts_the_device(cfg):
     app = create_app(two_door_cfg(cfg))
     with TestClient(app) as client:
@@ -207,7 +272,8 @@ def test_a_guest_invitation_restricts_the_device(cfg):
             "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
 
         invite = client.post("/api/invites", headers=owner, json={
-            "name": "Städning", "doors": ["front"], "expires_in_minutes": 120,
+            "name": "Städning", "role": "guest", "doors": ["front"],
+            "expires_at": time.time() + 3600,
         }).json()
         assert invite["doors"] == ["front"]
 
@@ -257,7 +323,8 @@ def test_an_expired_guest_is_refused(cfg):
         owner = {"Authorization": "Bearer " + client.post(
             "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
         invite = client.post("/api/invites", headers=owner, json={
-            "name": "Gäst", "doors": ["front"], "expires_in_minutes": 5,
+            "name": "Gäst", "role": "guest", "doors": ["front"],
+            "expires_at": time.time() + 600,
         }).json()
         token = client.post("/api/pair",
                             json={"code": invite["code"], "name": "G"}).json()["device_token"]
