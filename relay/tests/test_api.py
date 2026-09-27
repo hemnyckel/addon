@@ -56,6 +56,17 @@ def test_pair_with_a_bad_code_is_rejected(cfg):
         assert client.post("/api/pair", json={"code": "NOPE", "name": "x"}).status_code == 401
 
 
+def test_pairing_is_rate_limited(cfg, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "_PAIR_MAX_ATTEMPTS", 3)
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        for _ in range(3):
+            assert client.post("/api/pair", json={"code": "NOPE", "name": "x"}).status_code == 401
+        assert client.post("/api/pair", json={"code": "NOPE", "name": "x"}).status_code == 429
+
+
 def test_a_person_registers_even_without_a_push_token(cfg):
     app = create_app(cfg)
     with TestClient(app) as client:

@@ -18,6 +18,7 @@ from fastapi import (
     FastAPI,
     Header,
     HTTPException,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -49,6 +50,10 @@ _APP_METHOD = "App"
 # lock's own auto-relock (the lock reports it as "unattributed", like any other).
 _AUTO_RELOCK_WINDOW = 30
 _AUTO_METHOD = "Automatiskt"
+# Pairing is the only unauthenticated endpoint, and the relay may be reachable
+# from the internet through a reverse proxy: bound the attempts per client.
+_PAIR_MAX_ATTEMPTS = 10
+_PAIR_WINDOW = 60
 # Upper bound on concurrent pushes, so a busy household can't open thousands
 # of connections at once.
 _MAX_CONCURRENT_PUSHES = 16
@@ -80,11 +85,24 @@ class State:
         self._pending_attributions: dict[tuple[str, str], dict[str, Any]] = {}
         # When each door was last unlocked, to recognise its automatic relock.
         self._last_unlock: dict[str, float] = {}
+        # Pairing attempts per client, to bound brute force.
+        self._pair_attempts: dict[str, list[float]] = {}
 
     def cancel_live_ends(self) -> None:
         for task in list(self._live_end_tasks.values()):
             task.cancel()
         self._live_end_tasks.clear()
+
+    def pairing_allowed(self, client: str) -> bool:
+        """Record a pairing attempt; False once the client is over the limit."""
+        now = time.time()
+        recent = [t for t in self._pair_attempts.get(client, []) if now - t < _PAIR_WINDOW]
+        if len(recent) >= _PAIR_MAX_ATTEMPTS:
+            self._pair_attempts[client] = recent
+            return False
+        recent.append(now)
+        self._pair_attempts[client] = recent
+        return True
 
     # -- incoming events -----------------------------------------------------
     async def on_ha_event(self, event: dict[str, Any]) -> None:
@@ -441,7 +459,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         }
 
     @api.post("/pair")
-    async def pair(payload: dict[str, Any]) -> dict[str, Any]:
+    async def pair(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+        client = request.client.host if request.client else "unknown"
+        if not state.pairing_allowed(client):
+            raise HTTPException(429, "too many pairing attempts; try again shortly")
         code = str(payload.get("code", "")).upper()
         if not code or code != state.pair_code or time.time() > state.pair_expires:
             raise HTTPException(401, "invalid or expired code")
