@@ -4,6 +4,7 @@ Apple push notifications, and forwards app actions back to Home Assistant.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import time
@@ -14,12 +15,27 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 
 from .apns import ApnsClient
-from .config import Config, Door, load_config
+from .config import Config, Door, load_config, normalize_env
 from .events import from_ha
 from .ha import HaClient
 from .store import Store
 
 _LOGGER = logging.getLogger("hemnyckel")
+
+# How long APNs should keep trying to deliver an alert (seconds).
+_ALERT_TTL = 3600
+# Upper bound on concurrent pushes, so a busy household can't open thousands
+# of connections at once.
+_MAX_CONCURRENT_PUSHES = 16
+
+
+def _prefs(raw: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except ValueError:
+        return {}
+
 
 
 class State:
@@ -31,6 +47,7 @@ class State:
         self.pair_code = secrets.token_hex(3).upper()
         self.pair_expires = time.time() + 600
         self.sockets: set[WebSocket] = set()
+        self._send_sem = asyncio.Semaphore(_MAX_CONCURRENT_PUSHES)
 
     # -- incoming events -----------------------------------------------------
     async def on_ha_event(self, event: dict[str, Any]) -> None:
@@ -41,7 +58,7 @@ class State:
             self.store.add_event(mapped)
             await self.broadcast(mapped)
             await self.notify(mapped)
-        except Exception:  # noqa: BLE001 - never let one event kill the HA session
+        except Exception:
             _LOGGER.exception("failed to handle Home Assistant event")
 
     # -- push ----------------------------------------------------------------
@@ -74,20 +91,34 @@ class State:
         if ev.get("source") == "auto":
             return
         payload = self._payload(ev, door)
+        expiration = int(time.time()) + _ALERT_TTL
+        # Collapse a burst on the same door and action into one notification.
+        collapse_id = f"door-{door.id}-{ev['action']}"[:64]
+
+        targets = []
         for device in self.store.devices():
             if not device["apns_token"]:
                 continue
-            prefs = {}
-            try:
-                import json
-                prefs = json.loads(device["prefs"] or "{}")
-            except ValueError:
-                prefs = {}
+            prefs = _prefs(device["prefs"])
             if prefs.get("doors") and door.id not in prefs["doors"]:
                 continue
             if ev.get("person") and prefs.get("skip_self") and device["person"] == ev["person"]:
                 continue
-            await self.apns.send(device["apns_token"], payload)
+            targets.append(device)
+
+        async def deliver(device: Any) -> None:
+            async with self._send_sem:
+                result = await self.apns.send(
+                    device["apns_token"],
+                    payload,
+                    env=normalize_env(device["apns_env"] or self.cfg.apns_env),
+                    expiration=expiration,
+                    collapse_id=collapse_id,
+                )
+            if result.invalidate_token:
+                self.store.disable_apns(device["id"])
+
+        await asyncio.gather(*(deliver(d) for d in targets))
 
     async def broadcast(self, ev: dict[str, Any]) -> None:
         dead = []
@@ -152,13 +183,15 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         await state.apns.stop()
 
     app = FastAPI(title="Hemnyckel relay", version="0.1.0", lifespan=lifespan)
+    # Expose the runtime state for tests and debugging (app.state.hmk).
+    app.state.hmk = state
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
         return {
             "status": "ok",
             "ha": state.ha.connected,
-            "apns": state.cfg.apns_configured,
+            "apns": state.apns.live,
             "doors": len(cfg.doors),
             "version": app.version,
         }
@@ -181,6 +214,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             str(payload.get("apns_token") or ""),
             payload.get("person"),
             payload.get("prefs") or {},
+            normalize_env(payload.get("apns_env") or cfg.apns_env),
         )
         return {"ok": True}
 
@@ -198,7 +232,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             ev = state.store.last_event(d.id)
             if ev and ev.get("person"):
                 presence[ev["person"]] = "home" if ev["action"] == "unlock" else "away"
-        return {"doors": doors, "presence": presence, "relay": {"online": True, "apns": cfg.apns_configured}}
+        return {"doors": doors, "presence": presence, "relay": {"online": True, "apns": state.apns.live}}
 
     @app.post("/action")
     async def action(payload: dict[str, Any], _: dict = Depends(require_device)) -> dict[str, Any]:

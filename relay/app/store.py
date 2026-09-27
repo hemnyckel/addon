@@ -8,11 +8,24 @@ import time
 from typing import Any
 
 
+def _row(row: sqlite3.Row) -> dict[str, Any]:
+    """A row as a dict, with `door_open` normalised to a real bool or None."""
+    data = dict(row)
+    if data.get("door_open") is not None:
+        data["door_open"] = bool(data["door_open"])
+    return data
+
+
 class Store:
     def __init__(self, data_dir: str) -> None:
         os.makedirs(data_dir, exist_ok=True)
-        self._db = sqlite3.connect(os.path.join(data_dir, "hemnyckel.db"))
+        # All access happens on the event-loop thread (the API is fully async),
+        # but allow other threads so the relay can be driven from tests/tools.
+        self._db = sqlite3.connect(
+            os.path.join(data_dir, "hemnyckel.db"), check_same_thread=False
+        )
         self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA busy_timeout=5000")
         self._migrate()
 
     def _migrate(self) -> None:
@@ -23,6 +36,7 @@ class Store:
                 name TEXT NOT NULL,
                 person TEXT,
                 apns_token TEXT,
+                apns_env TEXT NOT NULL DEFAULT 'production',
                 prefs TEXT NOT NULL DEFAULT '{}',
                 created REAL NOT NULL
             );
@@ -40,6 +54,12 @@ class Store:
             CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
             """
         )
+        # Migration for databases created before apns_env existed.
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(devices)")}
+        if "apns_env" not in columns:
+            self._db.execute(
+                "ALTER TABLE devices ADD COLUMN apns_env TEXT NOT NULL DEFAULT 'production'"
+            )
         self._db.commit()
 
     # -- devices ------------------------------------------------------------
@@ -50,10 +70,22 @@ class Store:
         )
         self._db.commit()
 
-    def set_apns(self, device_id: str, apns_token: str, person: str | None, prefs: dict[str, Any]) -> None:
+    def set_apns(self, device_id: str, apns_token: str, person: str | None,
+                 prefs: dict[str, Any], env: str = "production") -> None:
         self._db.execute(
-            "UPDATE devices SET apns_token = ?, person = ?, prefs = ? WHERE id = ?",
-            (apns_token, person, json.dumps(prefs), device_id),
+            "UPDATE devices SET apns_token = ?, person = ?, prefs = ?, apns_env = ? WHERE id = ?",
+            (apns_token, person, json.dumps(prefs), env, device_id),
+        )
+        self._db.commit()
+
+    def disable_apns(self, device_id: str) -> None:
+        """Drop a device's push token after Apple says it is dead.
+
+        The device keeps its pairing token, so the app can re-register a fresh
+        APNs token on its next launch — it just gets no pushes until then.
+        """
+        self._db.execute(
+            "UPDATE devices SET apns_token = NULL WHERE id = ?", (device_id,)
         )
         self._db.commit()
 
@@ -88,23 +120,26 @@ class Store:
     def events(self, *, since: float | None = None, door: str | None = None,
                person: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         q = "SELECT * FROM events"
-        where, args = [], []
+        where: list[str] = []
+        args: list[Any] = []
         if since is not None:
-            where.append("ts >= ?"); args.append(since)
+            where.append("ts >= ?")
+            args.append(since)
         if door:
-            where.append("door = ?"); args.append(door)
+            where.append("door = ?")
+            args.append(door)
         if person:
-            where.append("person = ?"); args.append(person)
+            where.append("person = ?")
+            args.append(person)
         if where:
             q += " WHERE " + " AND ".join(where)
-        q += " ORDER BY ts ASC LIMIT ?"; args.append(limit)
+        q += " ORDER BY ts ASC LIMIT ?"
+        args.append(limit)
         rows = self._db.execute(q, args).fetchall()
-        return [dict(r) | {"door_open": None if r["door_open"] is None else bool(r["door_open"])} for r in rows]
+        return [_row(row) for row in rows]
 
     def last_event(self, door: str) -> dict[str, Any] | None:
         row = self._db.execute(
             "SELECT * FROM events WHERE door = ? ORDER BY ts DESC LIMIT 1", (door,)
         ).fetchone()
-        if row is None:
-            return None
-        return dict(row) | {"door_open": None if row["door_open"] is None else bool(row["door_open"])}
+        return None if row is None else _row(row)

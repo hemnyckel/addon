@@ -30,6 +30,12 @@ class Config:
     apns_key_id: str = ""
     apns_team_id: str = ""
     bundle_id: str = "se.hemnyckel.app"
+    # Default environment for devices that don't report one. "development"
+    # (a.k.a. sandbox) is used by debug builds, "production" by TestFlight/App
+    # Store builds.
+    apns_env: str = "production"
+    # Optional override; defaults to the bundle id.
+    apns_topic: str = ""
     data_dir: str = "/data"
     port: int = 8099
     doors: list[Door] = field(default_factory=list)
@@ -37,6 +43,18 @@ class Config:
     @property
     def apns_configured(self) -> bool:
         return bool(self.apns_key_path and self.apns_key_id and self.apns_team_id)
+
+    @property
+    def topic(self) -> str:
+        return self.apns_topic or self.bundle_id
+
+    def apns_key_material(self) -> str:
+        """The `.p8` contents: inline PEM, or the file at `apns_key_path`."""
+        value = self.apns_key_path
+        if "BEGIN" in value and "PRIVATE KEY" in value:
+            return value
+        with open(value, encoding="utf-8") as fh:
+            return fh.read()
 
     @property
     def ha_configured(self) -> bool:
@@ -62,6 +80,14 @@ def _options_file() -> dict:
         return {}
 
 
+def normalize_env(value: str | None) -> str:
+    """Accept the names people actually use; store the two APNs host names."""
+    v = (value or "").strip().lower()
+    if v in ("sandbox", "dev", "development"):
+        return "development"
+    return "production"
+
+
 def load_config() -> Config:
     opts = _options_file()
     def pick(env: str, key: str, default: str = "") -> str:
@@ -84,6 +110,8 @@ def load_config() -> Config:
         apns_key_id=pick("HEMNYCKEL_APNS_KEY_ID", "apns_key_id"),
         apns_team_id=pick("HEMNYCKEL_APNS_TEAM_ID", "apns_team_id"),
         bundle_id=pick("HEMNYCKEL_BUNDLE_ID", "bundle_id", "se.hemnyckel.app"),
+        apns_env=normalize_env(pick("HEMNYCKEL_APNS_ENV", "apns_env", "production")),
+        apns_topic=pick("HEMNYCKEL_APNS_TOPIC", "apns_topic"),
         data_dir=pick("HEMNYCKEL_DATA_DIR", "data_dir", "/data"),
         port=int(pick("HEMNYCKEL_PORT", "port", "8099")),
         doors=doors,

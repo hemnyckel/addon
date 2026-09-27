@@ -19,6 +19,8 @@ options:
   apns_key_id: ""
   apns_team_id: ""
   bundle_id: "se.hemnyckel.app"
+  apns_env: "production"
+  apns_topic: ""
   doors: []
 schema:
   ha_url: str
@@ -27,6 +29,8 @@ schema:
   apns_key_id: str
   apns_team_id: str
   bundle_id: str
+  apns_env: list(development|production)
+  apns_topic: str
   doors:
     - id: str
       name: str
