@@ -95,9 +95,10 @@ class State:
             self._attribute(mapped)
             self._classify_auto_relock(mapped)
             self._track_unlock(mapped)
+            previous = self.store.last_event(mapped["door"])
             self.store.add_event(mapped)
             await self.broadcast(mapped)
-            await self.notify(mapped)
+            await self.notify(mapped, previous=previous)
             await self.update_live_activity(mapped)
         except Exception:
             _LOGGER.exception("failed to handle Home Assistant event")
@@ -173,12 +174,17 @@ class State:
             "event": ev,
         }
 
-    async def notify(self, ev: dict[str, Any]) -> None:
+    async def notify(self, ev: dict[str, Any], *,
+                     previous: dict[str, Any] | None = None) -> None:
         door = self.cfg.door(ev["door"])
         if door is None:
             return
         # System events (auto-relock) are mirrored but never interrupt anyone.
         if ev.get("source") == "auto":
+            return
+        # A report that repeats the door's last action changes nothing — some
+        # locks emit a redundant "lock" every hour. Never notify for noise.
+        if previous is not None and previous.get("action") == ev["action"]:
             return
         payload = self._payload(ev, door)
         expiration = int(time.time()) + _ALERT_TTL

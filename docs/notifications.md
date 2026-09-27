@@ -69,3 +69,5 @@ relocks itself all day stays quiet.
 2. Batch routine activity.
 3. Respect quiet hours and Focus.
 4. A failed action never reports success; a stale state never looks live.
+5. Never notify a report that repeats the door's last action — some locks emit a
+   redundant "lock" about once an hour, which is a record, not news.

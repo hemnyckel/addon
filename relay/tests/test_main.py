@@ -400,6 +400,39 @@ def test_an_auto_relock_never_notifies(cfg):
     assert state.apns.sent == []
 
 
+def test_a_redundant_lock_never_notifies(cfg):
+    state = make_state(cfg)
+    state.store.add_device("d1", "iPhone")
+    state.store.set_apns("d1", DEVICE_TOKEN, "claes", {}, "production")
+    already_locked = {**UNLOCK, "action": "lock", "source": "unattributed", "person": None}
+
+    # Some locks report a redundant "lock" every hour; it is not worth a push.
+    asyncio.run(state.notify(already_locked, previous={**UNLOCK, "action": "lock"}))
+
+    assert state.apns.sent == []
+
+
+def test_a_lock_after_an_unlock_still_notifies(cfg):
+    state = make_state(cfg)
+    state.store.add_device("d1", "iPhone")
+    state.store.set_apns("d1", DEVICE_TOKEN, "claes", {}, "production")
+    lock = {**UNLOCK, "action": "lock", "source": "unattributed", "person": None}
+
+    asyncio.run(state.notify(lock, previous={**UNLOCK, "action": "unlock"}))
+
+    assert len(state.apns.sent) == 1
+
+
+def test_a_redundant_unlock_never_notifies(cfg):
+    state = make_state(cfg)
+    state.store.add_device("d1", "iPhone")
+    state.store.set_apns("d1", DEVICE_TOKEN, "claes", {}, "production")
+
+    asyncio.run(state.notify(UNLOCK, previous={**UNLOCK, "action": "unlock"}))
+
+    assert state.apns.sent == []
+
+
 def test_auto_relock_is_classified_end_to_end(cfg):
     state = make_state(cfg)
     unlock = {"event_type": "nimly_journal_entry",
