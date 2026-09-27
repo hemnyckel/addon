@@ -217,6 +217,7 @@ def test_a_family_member_invitation_makes_a_user(cfg):
         row = hmk.store.device(token)
         assert row["role"] == "user"
         assert row["name"] == "Elsa"          # the invitation names the person
+        assert row["person"] == "Elsa"        # …so "who opened" works from the start
         assert not row["expires"]             # permanent
         assert client.get("/api/state",
                           headers={"Authorization": f"Bearer {token}"}).json()["role"] == "user"

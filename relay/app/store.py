@@ -142,9 +142,9 @@ class Store:
         """A device created from an owner's invitation (a family member or guest)."""
         self._db.execute(
             "INSERT OR REPLACE INTO devices "
-            "(id, name, role, doors, days, from_time, to_time, expires, created) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (device_id, name, role, json.dumps(doors), json.dumps(days),
+            "(id, name, person, role, doors, days, from_time, to_time, expires, created) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (device_id, name, name, role, json.dumps(doors), json.dumps(days),
              from_time, to_time, expires, time.time()),
         )
         self._db.commit()
