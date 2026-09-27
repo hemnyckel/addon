@@ -7,7 +7,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import httpx
 import websockets
@@ -56,8 +57,17 @@ class HaClient:
                 raise RuntimeError(f"Home Assistant auth failed: {auth.get('type')}")
             self._connected = True
             _LOGGER.info("Connected to Home Assistant")
-            await ws.send(json.dumps({"id": 1, "type": "subscribe_events", "event_type": "nimly_journal_entry"}))
-            await ws.send(json.dumps({"id": 2, "type": "subscribe_events", "event_type": "state_changed"}))
+            await ws.send(
+                json.dumps(
+                    {"id": 1, "type": "subscribe_events",
+                     "event_type": "nimly_journal_entry"}
+                )
+            )
+            await ws.send(
+                json.dumps(
+                    {"id": 2, "type": "subscribe_events", "event_type": "state_changed"}
+                )
+            )
             async for raw in ws:
                 msg = json.loads(raw)
                 if msg.get("type") != "event":
