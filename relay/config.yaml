@@ -13,6 +13,12 @@ init: false
 # Talk to Home Assistant through the supervisor, which injects the token: the
 # add-on needs no Home Assistant credentials at all.
 homeassistant_api: true
+# The app talks to the relay on the home network (and through the reverse proxy
+# when away).
+ports:
+  "8099/tcp": 8099
+ports_description:
+  "8099/tcp": "Hemnyckel-reläet (appens API)"
 map:
   - data:rw
 options:
