@@ -50,13 +50,31 @@ def test_payload_answers_who_when_how(cfg):
     aps = payload["aps"]
 
     assert aps["alert"]["title"] == "Ytterdörren"
-    assert "Elise" in aps["alert"]["subtitle"]
-    assert "Kod" in aps["alert"]["subtitle"]
+    assert aps["alert"]["subtitle"] == "Elise · Kod"
     assert aps["alert"]["body"].startswith("Låstes upp")
     assert aps["category"] == "DOOR_EVENT"
     assert aps["thread-id"] == "door-front"
     assert aps["mutable-content"] == 1
     assert payload["event"]["id"] == "e1"
+
+
+def test_payload_carries_the_door_name_for_the_phone_to_write_from(cfg):
+    """The phone localizes the words; the event is the facts it needs.
+
+    The door's human name travels with the push (so the phone never maps
+    "front" to a name), and the fallback alert is left exactly as it was for a
+    phone whose Notification Service Extension does not run.
+    """
+    payload = make_state(cfg)._payload(UNLOCK, cfg.doors[0])
+    event = payload["event"]
+
+    assert event["door_name"] == "Ytterdörren"
+    # Everything else the phone needs is still there, unchanged.
+    assert event["door"] == "front"
+    assert event["source"] == "keypad"
+    assert event["person"] == "Elise"
+    assert event["action"] == "unlock"
+    assert event["door_open"] is None
 
 
 def test_notify_sends_with_device_environment_and_collapse(cfg):

@@ -392,6 +392,10 @@ class State:
 
     # -- push ----------------------------------------------------------------
     def _payload(self, ev: dict[str, Any], door: Door) -> dict[str, Any]:
+        # `aps.alert` is the fallback for a phone whose Notification Service
+        # Extension does not run: Swedish, chosen here. The `event` alongside it
+        # is the facts, including the door's human name, so the phone can write
+        # the visible words itself, in its own language.
         person = ev.get("person") or "Någon"
         verb = "Låstes upp" if ev["action"] == "unlock" else "Låstes"
         when = time.strftime("%H:%M", time.localtime(ev["ts"]))
@@ -409,7 +413,7 @@ class State:
                 "mutable-content": 1,
                 "relevance-score": 1.0,
             },
-            "event": ev,
+            "event": {**ev, "door_name": door.name},
         }
 
     async def notify(self, ev: dict[str, Any], *,

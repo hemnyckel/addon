@@ -72,6 +72,12 @@ fresh one on its next launch — so a wrong environment self-heals.
 - **Headers:** `apns-topic` = bundle id, `apns-push-type: alert`, `apns-priority:
   10`, `apns-expiration` (1 h), a per door+action `apns-collapse-id` (bursts
   collapse), and a unique `apns-id` per push.
+- **Payload:** the alert carries the door's human name and the raw facts under
+  the `event` key (`door_name`, `person`, `slot`, `action`, `source`, …) with
+  `mutable-content: 1`. The phone's Notification Service Extension writes the
+  visible title/subtitle/body itself, in the phone's language, from `source` —
+  the relay never chooses a language. `aps.alert` is the Swedish fallback for a
+  phone whose extension does not run. See `../relay/README.md`.
 - **Result handling:** `Unregistered` / `BadDeviceToken` / `DeviceTokenNotForTopic`
   → drop the token (the pairing survives); `429` / `500` / `503` and transport
   errors → retry with backoff (honouring `Retry-After`).

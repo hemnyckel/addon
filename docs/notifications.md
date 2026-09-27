@@ -8,11 +8,15 @@ never become noise.
 A notification answers *who, when, how, which door*:
 
 - **Title** — the door ("Ytterdörren").
-- **Subtitle** — person · method ("Elise · Fingeravtryck").
+- **Subtitle** — who · how ("Elise · Fingeravtryck").
 - **Body** — action + local time ("Låstes upp 16:12").
 - **Grouping** — `threadIdentifier` per door, so a busy door collapses neatly.
-- **Enrichment** — `mutable-content: 1`; a Notification Service Extension fills in
-  detail (and a door-open context when a Thread sensor exists).
+- **Wording lives on the phone.** The relay sends the facts — the door's human
+  name, who (person or slot), the action and the `source` — under `mutable-content:
+  1`; the app's Notification Service Extension composes the visible words in the
+  phone's own language. The relay never picks a language and never has to be
+  redeployed to fix wording. `aps.alert` is only the Swedish fallback for a phone
+  whose extension does not run.
 
 ## Categories and actions
 

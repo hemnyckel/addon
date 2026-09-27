@@ -48,6 +48,19 @@ See `../docs/apns.md` for creating the key and choosing sandbox vs production.
   registers a fresh token.
 - Sends are bounded to a small number of concurrent connections per event.
 
+## Who writes the notification
+
+The relay sends **facts, not final words**. Each alert carries the door's human
+name and the raw event alongside `aps.alert`, with `mutable-content: 1`; the
+app's Notification Service Extension composes the visible title/subtitle/body on
+the phone, in the phone's own language, from the event's `source` (keypad,
+finger, rfid, tag, app, auto, unattributed) rather than the relay's Swedish
+`method` label. Fixing a wording is an app update, never a relay redeploy.
+
+`aps.alert` is the fallback for a phone whose extension does not run (older iOS,
+extension disabled): it stays Swedish and is only replaced when the push carries
+a usable `event`.
+
 ## Live Activities
 
 When a door unlocks, the relay also drives a Live Activity on the Lock Screen and
