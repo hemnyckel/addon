@@ -34,6 +34,10 @@ builds, APNs sandbox) or `production` (TestFlight / App Store); the relay stores
 it per device and sends to the matching APNs host. `prefs` is a small object (see
 below).
 
+`apns_token` may be **empty** — a device without push (a simulator, or before an
+APNs key exists) should still register, so the relay learns its `person` and can
+attribute an app-initiated lock/unlock to them.
+
 ## Events
 
 ```
@@ -69,6 +73,13 @@ POST /action          Authorization: Bearer <device_token>
 
 Actions are forwarded to Home Assistant. If the lock does not confirm, the app
 shows a clear, recoverable state — never a silent success.
+
+When the lock reports the operation back, the relay **credits it to the person**
+whose device asked for it: the event becomes `source: "app"`, `method: "App"` and
+that person, so history reads "Claes · App" instead of "Oattribuerad" (and the
+"never notify the person who acted" rule works for app actions too). The credit
+is short-lived and only ever applies to a report that carries no attribution of
+its own — a keypad or fingerprint entry is never overwritten.
 
 ## Live Activities
 
