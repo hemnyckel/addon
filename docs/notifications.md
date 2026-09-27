@@ -44,9 +44,15 @@ Per person and per device:
 
 ## Live Activities
 
-While a door is unlocked or open, a Live Activity shows the state on the Lock
-Screen and in the Dynamic Island (compact = state, expanded = last person +
-Lock). It ends automatically when the door locks/closes.
+While a door is unlocked, a Live Activity shows the state on the Lock Screen and
+in the Dynamic Island (compact = state, expanded = last person + the action).
+The card carries a **Lås** button while the door is unlocked. When the door
+locks, the card flips to **Låst** and lingers about a minute — an undo window in
+which the button reads **Lås upp** — then ends and dismisses itself.
+
+The buttons are App Intents (`LiveActivityIntent`) that run in the app's process,
+call the relay, and only reflect the new state once the lock *confirms* — a
+failed action never looks successful.
 
 ## Anti-noise rules
 
