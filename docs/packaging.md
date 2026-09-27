@@ -28,18 +28,25 @@ Add-ons → Add-on Store → ⋮ → Repositories**. The add-on itself lives in 
 (its `slug` is `hemnyckel`, which is what matters, not the folder name):
 
 ```
-hemnyckel/                 the repository
+addon/                     this repository (github.com/hemnyckel/addon)
 ├── repository.yaml        ← makes it an add-on repository
 ├── relay/                 ← the add-on
 │   ├── config.yaml        name, version, options, schema
 │   ├── Dockerfile         built on the Home Assistant host
 │   ├── app/               the relay itself
 │   └── README.md          what users read in the store
-├── ios/                   the app (XcodeGen project, no committed .xcodeproj)
 ├── docs/                  design, notifications, api, apns, packaging
 ├── tools/                 development helpers
 └── shared/                the event schema both sides agree on
 ```
+
+Hemnyckel is three repositories, so each part has one home:
+
+| Part | Repository | Visibility |
+|---|---|---|
+| This add-on (the relay) | `hemnyckel/addon` | public |
+| The lock integration | `hemnyckel/integration` | public (HACS requires it) |
+| The iOS app | `hemnyckel/ios` | private |
 
 **No Home Assistant credentials are configured.** The add-on declares
 `homeassistant_api: true`, and the supervisor injects `SUPERVISOR_TOKEN`, which
@@ -51,15 +58,18 @@ offers the update to every installation.
 
 ## The integration is a HACS repository
 
-The lock integration is its own repository (`nimly`, kept for the future) with
-`hacs.json`, semantic git tags and release notes. The family installs it through
-**HACS → custom repository**, and updates arrive like any other HACS integration.
+The lock integration lives at **`hemnyckel/integration`** (the `nimly` project,
+renamed and trimmed) with `hacs.json`, semantic git tags and release notes. The
+family installs it through **HACS → custom repository**, and updates arrive like
+any other HACS integration.
 
-The family's build keeps **only the local half**: ZHA control, slot and
-credential management (PIN, RFID, fingerprint, enrollment, slot names), the
-guest-code services and the **journal** the relay reads. The **vendor cloud** and
-the **bridge emulator** are dropped from this build — the code stays in the
-repository, the installations simply have no cloud/bridge entries.
+The integration keeps **only the local half**: ZHA control, slot and credential
+management (PIN, RFID, fingerprint, enrollment, slot names), the guest-code
+services and the **journal** the relay reads. The **vendor cloud** and the
+**bridge emulator** (the `cloud/` layer, the ESP32 bridge and its provisioning)
+are gone from this build. The full project — bridge, emulator, vendor-app
+coexistence — stays recoverable from the tags (`v1.0.14` is the last complete
+state), since the two projects have different purposes.
 
 The relay depends on two things from the integration, so they are part of its
 version requirement: the `nimly_journal_entry` event, and `entry_id` on each
@@ -67,10 +77,10 @@ journal entry (so doors can be told apart).
 
 ## The app goes in the App Store
 
-Source in `ios/`, generated with XcodeGen (no `.xcodeproj` in git). Versioned with
-`MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`. TestFlight for the family first,
-then the normal App Store flow. No account, no login: pairing is a **QR code**
-from an owner's device.
+Source in `hemnyckel/ios` (**private**), generated with XcodeGen (no `.xcodeproj`
+in git). Versioned with `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`. TestFlight
+for the family first, then the normal App Store flow. No account, no login:
+pairing is a **QR code** from an owner's device.
 
 ## What a family does, once (~15 minutes)
 

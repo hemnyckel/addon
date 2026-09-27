@@ -1,26 +1,31 @@
-# Hemnyckel
+# Hemnyckel — Home Assistant add-ons
 
-**A first-class, private companion for smart locks — built the way Apple would build it, only for one family and one home.**
+This repository is a **Home Assistant add-on repository**. It currently ships one
+add-on:
 
-Hemnyckel is a small system with one job: tell the family *who, when and how* a
-door was opened, and let them lock or unlock it — natively, instantly, and
-without ever opening a dashboard.
+| Add-on | What it does |
+|---|---|
+| **Hemnyckel** (`relay/`) | Turns local lock events into Apple push notifications, and lets the Hemnyckel app lock and unlock your doors. |
 
-- **iOS app** (SwiftUI) — rich push notifications, Lock/Unlock actions, history,
-  widgets, Live Activities, Control Center, Siri, Apple Watch.
-- **Local push relay** (Home Assistant add-on) — subscribes to your local lock
-  events and sends Apple Push Notifications. Runs in your home; no vendor cloud.
-- **Home Assistant integration** — the source of truth. It decodes the lock's
-  operation events (slot + method: keypad / fingerprint / tag / auto) and
-  journals them.
-- **Apple Home / Google Home** — parallel native control surface via Matter.
+## Install
 
-It supports **N locks** (three or more from the start), and each lock, person and
-notification preference is configurable.
+1. Home Assistant → **Settings → Add-ons → Add-on Store**.
+2. **⋮ → Repositories** → add `https://github.com/hemnyckel/addon`.
+3. Install **Hemnyckel**, set your doors and your APNs key, start it.
 
-> **Unofficial and unaffiliated.** This is an independent project. It is **not
-> affiliated with, endorsed by, or supported by** any lock vendor. Product names
-> and trademarks belong to their respective owners and are used only to describe
-> compatibility. It controls physical doors — use it entirely at your own risk.
+No Home Assistant credentials are needed: the add-on gets them from the supervisor.
 
-See `docs/` for the design, the notification contract and the relay API.
+The add-on's own documentation — options, doors, APNs setup, health — is in
+[`relay/README.md`](relay/README.md).
+
+## Where the rest of Hemnyckel lives
+
+| Part | Repository |
+|---|---|
+| The lock integration (local: ZHA, slots, journal) | [`hemnyckel/integration`](https://github.com/hemnyckel/integration) |
+| The iOS app | private |
+| This add-on (the relay) | this repository |
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

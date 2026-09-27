@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Secrets & data
+*.p8
+*.p12
+secrets.json
+data/
+
+# local diagnostics
+relay.log
+build_listen*.log
