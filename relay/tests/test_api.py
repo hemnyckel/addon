@@ -566,6 +566,12 @@ def test_a_guest_invitation_writes_a_code_on_each_chosen_door(cfg):
         assert fake.calls[0][2]["schedule"] == [
             {"days": ["mon", "wed"], "start": "08:00", "end": "17:00"}
         ]
+        # …and the arrangement's end date travels with it, so a weekly window
+        # cannot leave the cleaner's code on the lock for ever.
+        until = fake.calls[0][2]["until"]
+        assert until == datetime.fromtimestamp(
+            invite["expires_at"], UTC
+        ).isoformat()
 
         # The codes come back once, each with its door…
         assert invite["guest_codes"] == [

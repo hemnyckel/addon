@@ -762,6 +762,9 @@ class State:
             data: dict[str, Any] = {
                 "name": name,
                 "schedule": [_schedule_window(days, from_time, to_time)],
+                # The end date travels with the code whatever its kind: a weekly
+                # window must not let a cleaner's code outlive the arrangement.
+                "until": _iso_until(expires),
                 "entry_id": entry_id,
             }
         else:
