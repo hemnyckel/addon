@@ -36,6 +36,9 @@ class Config:
     apns_env: str = "production"
     # Optional override; defaults to the bundle id.
     apns_topic: str = ""
+    # Live Activities (Lock Screen / Dynamic Island while a door is unlocked).
+    live_enabled: bool = True
+    live_attributes_type: str = "HemnyckelLockAttributes"
     data_dir: str = "/data"
     port: int = 8099
     doors: list[Door] = field(default_factory=list)
@@ -88,6 +91,10 @@ def normalize_env(value: str | None) -> str:
     return "production"
 
 
+def _bool(value: str) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_config() -> Config:
     opts = _options_file()
     def pick(env: str, key: str, default: str = "") -> str:
@@ -112,6 +119,10 @@ def load_config() -> Config:
         bundle_id=pick("HEMNYCKEL_BUNDLE_ID", "bundle_id", "se.hemnyckel.app"),
         apns_env=normalize_env(pick("HEMNYCKEL_APNS_ENV", "apns_env", "production")),
         apns_topic=pick("HEMNYCKEL_APNS_TOPIC", "apns_topic"),
+        live_enabled=_bool(pick("HEMNYCKEL_LIVE_ENABLED", "live_enabled", "true")),
+        live_attributes_type=pick(
+            "HEMNYCKEL_LIVE_ATTRIBUTES_TYPE", "live_attributes_type", "HemnyckelLockAttributes"
+        ),
         data_dir=pick("HEMNYCKEL_DATA_DIR", "data_dir", "/data"),
         port=int(pick("HEMNYCKEL_PORT", "port", "8099")),
         doors=doors,

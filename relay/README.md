@@ -26,6 +26,8 @@ Options (Home Assistant add-on options, or environment variables):
 | `bundle_id` | The app's bundle id (default `se.hemnyckel.app`) |
 | `apns_env` | Default environment for devices that report none: `production` or `development` (sandbox). iOS debug builds report `development`. |
 | `apns_topic` | Optional APNs topic override; defaults to `bundle_id` |
+| `live_enabled` | Keep a Live Activity (Lock Screen / Dynamic Island) in step with an unlocked door (default `true`) |
+| `live_attributes_type` | The iOS `ActivityAttributes` type name the start push targets (default `HemnyckelLockAttributes`) |
 | `doors` | A list of `{id, name, lock_entity, door_sensor?, entry_id?}` |
 
 Without `apns_key` the relay runs in **dev mode** and logs pushes instead of
@@ -45,6 +47,14 @@ See `../docs/apns.md` for creating the key and choosing sandbox vs production.
   the device's push token is dropped (the pairing survives) until the app
   registers a fresh token.
 - Sends are bounded to a small number of concurrent connections per event.
+
+## Live Activities
+
+When a door unlocks, the relay also drives a Live Activity on the Lock Screen and
+in the Dynamic Island. If the app is running it has registered the activity's
+per-activity token and the relay just updates it; if not, the relay uses the
+device's push-to-start token. A lock (including auto-relock) ends the activity.
+See `../docs/api.md` for the three registration calls.
 
 ## Tests
 

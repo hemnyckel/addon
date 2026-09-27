@@ -37,8 +37,16 @@ class Store:
                 person TEXT,
                 apns_token TEXT,
                 apns_env TEXT NOT NULL DEFAULT 'production',
+                live_start_token TEXT,
                 prefs TEXT NOT NULL DEFAULT '{}',
                 created REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS live_activities (
+                device TEXT NOT NULL,
+                door TEXT NOT NULL,
+                token TEXT,
+                started REAL NOT NULL,
+                PRIMARY KEY (device, door)
             );
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
@@ -60,6 +68,8 @@ class Store:
             self._db.execute(
                 "ALTER TABLE devices ADD COLUMN apns_env TEXT NOT NULL DEFAULT 'production'"
             )
+        if "live_start_token" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN live_start_token TEXT")
         self._db.commit()
 
     # -- devices ------------------------------------------------------------
@@ -97,6 +107,45 @@ class Store:
 
     def remove_device(self, device_id: str) -> None:
         self._db.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+        self._db.commit()
+
+    # -- live activities ----------------------------------------------------
+    def set_live_start_token(self, device_id: str, token: str) -> None:
+        """A device's push-to-start token, used to start an activity headlessly."""
+        self._db.execute(
+            "UPDATE devices SET live_start_token = ? WHERE id = ?", (token, device_id)
+        )
+        self._db.commit()
+
+    def live_activities(self, door: str) -> list[sqlite3.Row]:
+        return list(
+            self._db.execute(
+                "SELECT * FROM live_activities WHERE door = ? ORDER BY started DESC", (door,)
+            )
+        )
+
+    def set_live_activity(self, device_id: str, door: str, token: str) -> None:
+        """Record the per-activity update token the app reported."""
+        self._db.execute(
+            "INSERT INTO live_activities (device, door, token, started) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(device, door) DO UPDATE SET token = excluded.token",
+            (device_id, door, token, time.time()),
+        )
+        self._db.commit()
+
+    def touch_live_start(self, device_id: str, door: str) -> None:
+        """Note that a push-to-start was sent, before the app reports a token."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO live_activities (device, door, token, started) "
+            "VALUES (?, ?, NULL, ?)",
+            (device_id, door, time.time()),
+        )
+        self._db.commit()
+
+    def drop_live_activity(self, device_id: str, door: str) -> None:
+        self._db.execute(
+            "DELETE FROM live_activities WHERE device = ? AND door = ?", (device_id, door)
+        )
         self._db.commit()
 
     # -- events -------------------------------------------------------------

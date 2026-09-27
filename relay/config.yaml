@@ -21,6 +21,8 @@ options:
   bundle_id: "se.hemnyckel.app"
   apns_env: "production"
   apns_topic: ""
+  live_enabled: true
+  live_attributes_type: "HemnyckelLockAttributes"
   doors: []
 schema:
   ha_url: str
@@ -31,6 +33,8 @@ schema:
   bundle_id: str
   apns_env: list(development|production)
   apns_topic: str
+  live_enabled: bool
+  live_attributes_type: str
   doors:
     - id: str
       name: str

@@ -65,6 +65,7 @@ def test_migrates_a_database_without_apns_env(tmp_path):
 
     store = Store(str(tmp_path))
     assert store.device("old")["apns_env"] == "production"
+    assert store.device("old")["live_start_token"] is None
 
 
 def test_events_are_bounded_and_queryable(tmp_path):
@@ -76,3 +77,25 @@ def test_events_are_bounded_and_queryable(tmp_path):
     assert store.last_event("front")["id"] == "e4"
     assert [e["id"] for e in store.events(since=2.0)] == ["e2", "e3", "e4"]
     assert store.last_event("back") is None
+
+
+def test_live_activity_tracking(tmp_path):
+    store = Store(str(tmp_path))
+    store.add_device("d1", "iPhone")
+
+    store.set_live_start_token("d1", "start-1")
+    assert store.device("d1")["live_start_token"] == "start-1"
+
+    # A push-to-start is remembered before the app reports a per-activity token.
+    store.touch_live_start("d1", "front")
+    assert store.live_activities("front")[0]["token"] is None
+
+    store.set_live_activity("d1", "front", "act-1")
+    assert store.live_activities("front")[0]["token"] == "act-1"
+
+    # Touching again must not wipe the token we already have.
+    store.touch_live_start("d1", "front")
+    assert store.live_activities("front")[0]["token"] == "act-1"
+
+    store.drop_live_activity("d1", "front")
+    assert store.live_activities("front") == []
