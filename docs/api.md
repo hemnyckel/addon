@@ -104,6 +104,25 @@ The relay owns the start/update/end pushes itself (topic
 produce notifications: an unlock starts or updates, a lock (including
 auto-relock) ends.
 
+## People (owner only)
+
+The first device to pair owns the install; every later device is a user. The
+relay enforces this, so a user never receives what it may not see.
+
+```
+GET /devices                     # owner only; 403 otherwise
+  -> 200 { "devices": [ { "id": "...", "name": "Claes' iPhone", "person": "Claes",
+                          "role": "owner", "created": 1758... } ] }
+
+POST /devices/<id>/role          # owner only
+  { "role": "owner" | "user" }
+  -> 200 { "ok": true }
+  -> 409 the last owner cannot be demoted
+```
+
+`GET /state` also carries the caller's `role`, so the app can show only what it
+may.
+
 ## Health
 
 ```

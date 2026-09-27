@@ -54,6 +54,8 @@ _AUTO_METHOD = "Automatiskt"
 # from the internet through a reverse proxy: bound the attempts per client.
 _PAIR_MAX_ATTEMPTS = 10
 _PAIR_WINDOW = 60
+# Roles a device can hold. Guests (a time window and chosen doors) come later.
+_ROLES = {"owner", "user"}
 # Upper bound on concurrent pushes, so a busy household can't open thousands
 # of connections at once.
 _MAX_CONCURRENT_PUSHES = 16
@@ -72,6 +74,7 @@ class State:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self.store = Store(cfg.data_dir)
+        self.store.ensure_owner()
         self.apns = ApnsClient(cfg)
         self.ha = HaClient(cfg, self.on_ha_event)
         self.pair_code = secrets.token_hex(3).upper()
@@ -430,6 +433,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(401, "invalid device token")
         return dict(device)
 
+    async def require_owner(device: dict = Depends(require_device)) -> dict:
+        if device.get("role") != "owner":
+            raise HTTPException(403, "owner only")
+        return device
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         logging.basicConfig(level=logging.INFO)
@@ -467,7 +475,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not code or code != state.pair_code or time.time() > state.pair_expires:
             raise HTTPException(401, "invalid or expired code")
         device_id = uuid.uuid4().hex
-        state.store.add_device(device_id, str(payload.get("name") or "Enhet"))
+        # The first device to pair owns the install; everyone after is a user.
+        role = "owner" if not state.store.devices() else "user"
+        state.store.add_device(device_id, str(payload.get("name") or "Enhet"), role)
         state.pair_code = secrets.token_hex(3).upper()
         state.pair_expires = time.time() + 600
         return {"device_token": device_id, "relay_id": "hemnyckel"}
@@ -490,14 +500,51 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"events": state.store.events(since=since, door=door, person=person, limit=limit)}
 
     @api.get("/state")
-    async def door_states(_: dict = Depends(require_device)) -> dict[str, Any]:
+    async def door_states(device: dict = Depends(require_device)) -> dict[str, Any]:
         doors = [await state.door_state(d) for d in cfg.doors]
         presence: dict[str, str] = {}
         for d in cfg.doors:
             ev = state.store.last_event(d.id)
             if ev and ev.get("person"):
                 presence[ev["person"]] = "home" if ev["action"] == "unlock" else "away"
-        return {"doors": doors, "presence": presence, "relay": {"online": True, "apns": state.apns.live}}
+        return {
+            "doors": doors,
+            "presence": presence,
+            # The caller's role, so the app can show only what it may.
+            "role": device.get("role", "user"),
+            "relay": {"online": True, "apns": state.apns.live},
+        }
+
+    # -- people (owner only) -------------------------------------------------
+    @api.get("/devices")
+    async def list_devices(_: dict = Depends(require_owner)) -> dict[str, Any]:
+        return {
+            "devices": [
+                {
+                    "id": d["id"],
+                    "name": d["name"],
+                    "person": d["person"],
+                    "role": d["role"],
+                    "created": d["created"],
+                }
+                for d in state.store.devices()
+            ]
+        }
+
+    @api.post("/devices/{device_id}/role")
+    async def set_device_role(device_id: str, payload: dict[str, Any],
+                              _: dict = Depends(require_owner)) -> dict[str, Any]:
+        role = str(payload.get("role") or "").lower()
+        if role not in _ROLES:
+            raise HTTPException(400, f"role must be one of {sorted(_ROLES)}")
+        target = state.store.device(device_id)
+        if target is None:
+            raise HTTPException(404, "unknown device")
+        if (target["role"] == "owner" and role != "owner"
+                and state.store.owner_count() <= 1):
+            raise HTTPException(409, "the last owner cannot be demoted")
+        state.store.set_role(device_id, role)
+        return {"ok": True}
 
     @api.post("/action")
     async def action(payload: dict[str, Any],

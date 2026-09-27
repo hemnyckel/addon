@@ -99,3 +99,19 @@ def test_live_activity_tracking(tmp_path):
 
     store.drop_live_activity("d1", "front")
     assert store.live_activities("front") == []
+
+
+def test_role_defaults_and_owner_bootstrap(tmp_path):
+    store = Store(str(tmp_path))
+    store.add_device("d1", "First")
+    store.add_device("d2", "Second")
+
+    assert store.device("d1")["role"] == "user"
+    assert store.owner_count() == 0
+
+    store.ensure_owner()
+    assert store.device("d1")["role"] == "owner"  # the oldest device owns
+    assert store.device("d2")["role"] == "user"
+
+    store.ensure_owner()  # idempotent
+    assert store.owner_count() == 1

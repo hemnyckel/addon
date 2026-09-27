@@ -67,6 +67,48 @@ def test_pairing_is_rate_limited(cfg, monkeypatch):
         assert client.post("/api/pair", json={"code": "NOPE", "name": "x"}).status_code == 429
 
 
+def test_the_first_device_is_the_owner_and_manages_people(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+
+        first = client.post("/api/pair",
+                            json={"code": hmk.pair_code, "name": "First"}).json()["device_token"]
+        second = client.post("/api/pair",
+                             json={"code": hmk.pair_code, "name": "Second"}).json()["device_token"]
+        assert hmk.store.device(first)["role"] == "owner"
+        assert hmk.store.device(second)["role"] == "user"
+
+        owner = {"Authorization": f"Bearer {first}"}
+        user = {"Authorization": f"Bearer {second}"}
+
+        # The caller's role comes with the state, so the app can adapt.
+        assert client.get("/api/state", headers=owner).json()["role"] == "owner"
+        assert client.get("/api/state", headers=user).json()["role"] == "user"
+
+        # Only an owner may see the family.
+        assert client.get("/api/devices", headers=user).status_code == 403
+        names = {d["name"] for d in client.get("/api/devices", headers=owner).json()["devices"]}
+        assert names == {"First", "Second"}
+
+        # The owner promotes the second device...
+        assert client.post(f"/api/devices/{second}/role", headers=owner,
+                           json={"role": "owner"}).json() == {"ok": True}
+        assert hmk.store.device(second)["role"] == "owner"
+
+        # ...then the first may step down, leaving a single owner...
+        assert client.post(f"/api/devices/{first}/role", headers=user,
+                           json={"role": "user"}).json() == {"ok": True}
+
+        # ...and the last owner cannot be demoted.
+        assert client.post(f"/api/devices/{second}/role", headers=user,
+                           json={"role": "user"}).status_code == 409
+
+        # An unknown role is rejected.
+        assert client.post(f"/api/devices/{second}/role", headers=user,
+                           json={"role": "king"}).status_code == 400
+
+
 def test_a_person_registers_even_without_a_push_token(cfg):
     app = create_app(cfg)
     with TestClient(app) as client:

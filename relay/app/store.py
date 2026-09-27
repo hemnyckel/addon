@@ -38,6 +38,7 @@ class Store:
                 apns_token TEXT,
                 apns_env TEXT NOT NULL DEFAULT 'production',
                 live_start_token TEXT,
+                role TEXT NOT NULL DEFAULT 'user',
                 prefs TEXT NOT NULL DEFAULT '{}',
                 created REAL NOT NULL
             );
@@ -70,15 +71,37 @@ class Store:
             )
         if "live_start_token" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN live_start_token TEXT")
+        if "role" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
         self._db.commit()
 
     # -- devices ------------------------------------------------------------
-    def add_device(self, device_id: str, name: str) -> None:
+    def add_device(self, device_id: str, name: str, role: str = "user") -> None:
         self._db.execute(
-            "INSERT OR REPLACE INTO devices (id, name, created) VALUES (?, ?, ?)",
-            (device_id, name, time.time()),
+            "INSERT OR REPLACE INTO devices (id, name, role, created) VALUES (?, ?, ?, ?)",
+            (device_id, name, role, time.time()),
         )
         self._db.commit()
+
+    def set_role(self, device_id: str, role: str) -> None:
+        self._db.execute("UPDATE devices SET role = ? WHERE id = ?", (role, device_id))
+        self._db.commit()
+
+    def owner_count(self) -> int:
+        row = self._db.execute(
+            "SELECT COUNT(*) AS c FROM devices WHERE role = 'owner'"
+        ).fetchone()
+        return int(row["c"])
+
+    def ensure_owner(self) -> None:
+        """Every install needs an owner: promote the oldest device if none is."""
+        if self.owner_count() > 0:
+            return
+        row = self._db.execute(
+            "SELECT id FROM devices ORDER BY created LIMIT 1"
+        ).fetchone()
+        if row is not None:
+            self.set_role(row["id"], "owner")
 
     def set_apns(self, device_id: str, apns_token: str, person: str | None,
                  prefs: dict[str, Any], env: str = "production") -> None:
