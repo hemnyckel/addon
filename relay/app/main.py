@@ -89,6 +89,48 @@ def _guest_expired(device: dict[str, Any]) -> bool:
                 and time.time() > float(expires))
 
 
+def _parse_hhmm(value: str) -> int | None:
+    try:
+        hour, minute = value.split(":")
+        hours, minutes = int(hour), int(minute)
+    except (ValueError, AttributeError):
+        return None
+    if 0 <= hours < 24 and 0 <= minutes < 60:
+        return hours * 60 + minutes
+    return None
+
+
+def _in_quiet(prefs: dict[str, Any], when: float) -> bool:
+    """Is this moment inside the device's quiet hours?"""
+    quiet = prefs.get("quiet") or {}
+    start = _parse_hhmm(str(quiet.get("from") or ""))
+    end = _parse_hhmm(str(quiet.get("to") or ""))
+    if start is None or end is None or start == end:
+        return False
+    local = time.localtime(when)
+    now = local.tm_hour * 60 + local.tm_min
+    if start < end:
+        return start <= now < end
+    return now >= start or now < end  # wraps midnight
+
+
+def _wants(prefs: dict[str, Any], ev: dict[str, Any]) -> bool:
+    """The device's notification preferences for this event.
+
+    Order matters: a switch first, then who it cares about, then quiet hours —
+    except for the people it always wants to hear about (the kids).
+    """
+    if prefs.get("enabled") is False:
+        return False
+    person = ev.get("person")
+    people = prefs.get("people") or []
+    if people and (not person or person not in people):
+        return False
+    if person and person in (prefs.get("watch") or []):
+        return True  # always, even in quiet hours
+    return not _in_quiet(prefs, ev["ts"])
+
+
 
 class State:
     def __init__(self, cfg: Config) -> None:
@@ -249,6 +291,8 @@ class State:
             if prefs.get("doors") and door.id not in prefs["doors"]:
                 continue
             if ev.get("person") and prefs.get("skip_self") and device["person"] == ev["person"]:
+                continue
+            if not _wants(prefs, ev):
                 continue
             targets.append(device)
 

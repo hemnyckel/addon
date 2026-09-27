@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 
 from app.apns import PushResult
 from app.main import State
@@ -406,6 +407,60 @@ def test_a_guest_is_never_notified(cfg):
     # Even with a push token, a guest is not notified.
     state.store.add_guest("g1", "Städning", ["front"], time.time() + 3600)
     state.store.set_apns("g1", DEVICE_TOKEN, None, {}, "production")
+
+    asyncio.run(state.notify(UNLOCK))
+
+    assert state.apns.sent == []
+
+
+# -- notification preferences -------------------------------------------------
+
+def _with_prefs(state, prefs):
+    state.store.add_device("d1", "iPhone")
+    state.store.set_apns("d1", DEVICE_TOKEN, "claes", prefs, "production")
+
+
+def test_quiet_hours_silence_a_device(cfg):
+    state = make_state(cfg)
+    _with_prefs(state, {"quiet": {"from": "22:00", "to": "07:00"}})
+
+    asyncio.run(state.notify({**UNLOCK, "ts": datetime(2026, 9, 27, 23, 0).timestamp()}))
+
+    assert state.apns.sent == []
+
+
+def test_a_daytime_event_is_not_silenced(cfg):
+    state = make_state(cfg)
+    _with_prefs(state, {"quiet": {"from": "22:00", "to": "07:00"}})
+
+    asyncio.run(state.notify({**UNLOCK, "ts": datetime(2026, 9, 27, 12, 0).timestamp()}))
+
+    assert len(state.apns.sent) == 1
+
+
+def test_a_watched_person_is_heard_even_in_quiet_hours(cfg):
+    state = make_state(cfg)
+    _with_prefs(state, {"quiet": {"from": "22:00", "to": "07:00"}, "watch": ["Elise"]})
+
+    asyncio.run(state.notify({**UNLOCK, "ts": datetime(2026, 9, 27, 23, 0).timestamp()}))
+
+    assert len(state.apns.sent) == 1  # Elise is watched
+
+
+def test_a_person_filter_narrows_the_notifications(cfg):
+    state = make_state(cfg)
+    _with_prefs(state, {"people": ["Elise"]})
+
+    asyncio.run(state.notify({**UNLOCK, "person": "Pappa"}))
+    assert state.apns.sent == []
+
+    asyncio.run(state.notify(UNLOCK))  # Elise
+    assert len(state.apns.sent) == 1
+
+
+def test_notifications_can_be_switched_off(cfg):
+    state = make_state(cfg)
+    _with_prefs(state, {"enabled": False})
 
     asyncio.run(state.notify(UNLOCK))
 
