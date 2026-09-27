@@ -41,6 +41,10 @@ _LIVE_START_GRACE = 300
 # After a door locks, keep the (now "Låst") Live Activity around for a short
 # while so its button can flip to "Lås upp" — an undo window — then end it.
 _LIVE_LINGER = 60
+# How long an app-initiated action stays eligible for attribution.
+_ATTRIBUTION_TTL = 20
+# Method text shown for an action the app caused.
+_APP_METHOD = "App"
 # Upper bound on concurrent pushes, so a busy household can't open thousands
 # of connections at once.
 _MAX_CONCURRENT_PUSHES = 16
@@ -67,6 +71,9 @@ class State:
         self._send_sem = asyncio.Semaphore(_MAX_CONCURRENT_PUSHES)
         # Pending "end" tasks, keyed by (device, door), for the linger window.
         self._live_end_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+        # Recent app-initiated actions, keyed by (door, action), so the lock's
+        # own unattributed report can be credited to whoever pressed the button.
+        self._pending_attributions: dict[tuple[str, str], dict[str, Any]] = {}
 
     def cancel_live_ends(self) -> None:
         for task in list(self._live_end_tasks.values()):
@@ -79,12 +86,42 @@ class State:
             mapped = from_ha(self.cfg, event)
             if mapped is None:
                 return
+            self._attribute(mapped)
             self.store.add_event(mapped)
             await self.broadcast(mapped)
             await self.notify(mapped)
             await self.update_live_activity(mapped)
         except Exception:
             _LOGGER.exception("failed to handle Home Assistant event")
+
+    # -- attribution ----------------------------------------------------------
+    def note_app_action(self, door_id: str, action: str, device: dict[str, Any]) -> None:
+        """Remember that this device just asked for ``action`` on ``door_id``.
+
+        Recorded *before* Home Assistant is called, because the lock can report
+        the operation back before the service call returns.
+        """
+        self._pending_attributions[(door_id, action)] = {
+            "person": device.get("person") or None,
+            "device": device.get("name"),
+            "expires": time.time() + _ATTRIBUTION_TTL,
+        }
+
+    def _attribute(self, ev: dict[str, Any]) -> None:
+        """Credit an unattributed lock report to the app action that caused it.
+
+        Only touches reports with no attribution of their own, so a keypad or
+        fingerprint entry is never overwritten.
+        """
+        if ev.get("source") != "unattributed":
+            return
+        pending = self._pending_attributions.pop((ev["door"], ev["action"]), None)
+        if pending is None or pending["expires"] < time.time():
+            return
+        if pending["person"]:
+            ev["person"] = pending["person"]
+        ev["source"] = "app"
+        ev["method"] = _APP_METHOD
 
     # -- push ----------------------------------------------------------------
     def _payload(self, ev: dict[str, Any], door: Door) -> dict[str, Any]:
@@ -296,10 +333,14 @@ class State:
         await asyncio.gather(*(one(s) for s in sends))
 
     # -- actions -------------------------------------------------------------
-    async def do_action(self, door_id: str, action: str) -> dict[str, Any]:
+    async def do_action(self, door_id: str, action: str,
+                        device: dict[str, Any] | None = None) -> dict[str, Any]:
         door = self.cfg.door(door_id)
         if door is None or action not in ("lock", "unlock"):
             raise HTTPException(400, "unknown door or action")
+        if device is not None:
+            # Before the service call: the lock may report back first.
+            self.note_app_action(door.id, action, device)
         ok = await self.ha.call_service("lock", action, {"entity_id": door.lock_entity})
         if not ok:
             return {"ok": False, "confirmed": False}
@@ -404,8 +445,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"doors": doors, "presence": presence, "relay": {"online": True, "apns": state.apns.live}}
 
     @api.post("/action")
-    async def action(payload: dict[str, Any], _: dict = Depends(require_device)) -> dict[str, Any]:
-        return await state.do_action(str(payload.get("door")), str(payload.get("action")))
+    async def action(payload: dict[str, Any],
+                     device: dict = Depends(require_device)) -> dict[str, Any]:
+        return await state.do_action(
+            str(payload.get("door")), str(payload.get("action")), device
+        )
 
     # -- live activities (Lock Screen / Dynamic Island) ---------------------
     @api.post("/live/start-token")

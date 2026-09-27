@@ -244,3 +244,99 @@ def test_a_dead_live_start_token_is_cleared(cfg):
     asyncio.run(state.update_live_activity(UNLOCK_EVENT))
 
     assert state.store.device("d1")["live_start_token"] == ""
+
+
+# -- attribution: crediting an app action to the person who pressed ----------
+
+UNATTRIBUTED = {**UNLOCK, "source": "unattributed", "person": None, "method": "Oattribuerad"}
+
+
+def test_an_app_action_is_credited_to_the_person(cfg):
+    state = make_state(cfg)
+    state.note_app_action("front", "unlock", {"id": "d1", "name": "Claes' iPhone", "person": "claes"})
+    event = dict(UNATTRIBUTED)
+
+    state._attribute(event)
+
+    assert event["person"] == "claes"
+    assert event["source"] == "app"
+    assert event["method"] == "App"
+
+
+def test_attribution_is_consumed_once(cfg):
+    state = make_state(cfg)
+    state.note_app_action("front", "unlock", {"id": "d1", "name": "x", "person": "claes"})
+
+    first, second = dict(UNATTRIBUTED), dict(UNATTRIBUTED)
+    state._attribute(first)
+    state._attribute(second)
+
+    assert first["source"] == "app"
+    assert second["source"] == "unattributed"  # only one report belongs to that action
+
+
+def test_attribution_expires(cfg, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "_ATTRIBUTION_TTL", -1)
+    state = make_state(cfg)
+    state.note_app_action("front", "unlock", {"id": "d1", "name": "x", "person": "claes"})
+    event = dict(UNATTRIBUTED)
+
+    state._attribute(event)
+
+    assert event["source"] == "unattributed"
+    assert event["person"] is None
+
+
+def test_attribution_needs_a_matching_door_and_action(cfg):
+    state = make_state(cfg)
+    state.note_app_action("front", "unlock", {"id": "d1", "name": "x", "person": "claes"})
+
+    wrong_action = {**UNATTRIBUTED, "action": "lock"}
+    wrong_door = {**UNATTRIBUTED, "door": "back"}
+    state._attribute(wrong_action)
+    state._attribute(wrong_door)
+
+    assert wrong_action["source"] == "unattributed"
+    assert wrong_door["source"] == "unattributed"
+
+
+def test_a_physical_entry_is_never_overwritten(cfg):
+    state = make_state(cfg)
+    state.note_app_action("front", "unlock", {"id": "d1", "name": "x", "person": "claes"})
+    physical = {**UNLOCK, "source": "keypad", "person": "Elise", "method": "Kod"}
+
+    state._attribute(physical)
+
+    assert physical["source"] == "keypad"
+    assert physical["person"] == "Elise"
+    assert physical["method"] == "Kod"
+
+
+def test_attribution_without_a_configured_person(cfg):
+    state = make_state(cfg)
+    state.note_app_action("front", "unlock", {"id": "d1", "name": "iPhone", "person": None})
+    event = dict(UNATTRIBUTED)
+
+    state._attribute(event)
+
+    assert event["source"] == "app"
+    assert event["method"] == "App"
+    assert event["person"] is None
+
+
+def test_a_zigbee_journal_entry_is_attributed_end_to_end(cfg):
+    state = make_state(cfg)
+    state.note_app_action("front", "unlock", {"id": "d1", "name": "x", "person": "claes"})
+    journal = {
+        "event_type": "nimly_journal_entry",
+        "data": {"entry": {"action": "unlock", "source": "zigbee", "time": 1700000000}},
+    }
+
+    asyncio.run(state.on_ha_event(journal))
+
+    stored = state.store.last_event("front")
+    assert stored["source"] == "app"
+    assert stored["method"] == "App"
+    assert stored["person"] == "claes"

@@ -54,3 +54,20 @@ def test_pair_with_a_bad_code_is_rejected(cfg):
     app = create_app(cfg)
     with TestClient(app) as client:
         assert client.post("/api/pair", json={"code": "NOPE", "name": "x"}).status_code == 401
+
+
+def test_a_person_registers_even_without_a_push_token(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        hmk.store.add_device("dev1", "iPhone")
+        auth = {"Authorization": "Bearer dev1"}
+
+        # No push (a simulator): the relay still learns who this device is, so it
+        # can attribute app-initiated lock/unlock.
+        assert client.post("/api/register", headers=auth,
+                           json={"apns_token": "", "person": "claes"}).json() == {"ok": True}
+
+        device = hmk.store.device("dev1")
+        assert device["person"] == "claes"
+        assert not device["apns_token"]
