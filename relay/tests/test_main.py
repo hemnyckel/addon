@@ -169,17 +169,56 @@ def test_a_pending_start_is_not_restarted_immediately(cfg):
     assert state.apns.sent == []
 
 
-def test_lock_ends_the_activity(cfg):
+def test_lock_lingers_then_ends(cfg, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "_LIVE_LINGER", 0.02)
     state = make_state(cfg)
     state.store.add_device("d1", "iPhone")
     state.store.set_live_activity("d1", "front", "act-token")
 
-    # Auto-relock still ends the activity, even though it never notifies.
+    async def go():
+        # Auto-relock still updates the card (to "Låst"), even though it never
+        # notifies, and schedules the end after the shorten linger.
+        await state.update_live_activity({**UNLOCK, "action": "lock", "source": "auto"})
+        assert state.apns.sent[0]["push_type"] == "update"
+        assert state.apns.sent[0]["payload"]["aps"]["content-state"]["locked"] is True
+        await asyncio.sleep(0.2)  # let the linger task run
+
+    asyncio.run(go())
+
+    assert [s["push_type"] for s in state.apns.sent] == ["update", "end"]
+    assert state.store.live_activities("front") == []
+
+
+def test_unlock_within_the_linger_cancels_the_end(cfg, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "_LIVE_LINGER", 100)
+    state = make_state(cfg)
+    state.store.add_device("d1", "iPhone")
+    state.store.set_live_activity("d1", "front", "act-token")
+
+    async def go():
+        await state.update_live_activity({**UNLOCK, "action": "lock", "source": "auto"})
+        assert ("d1", "front") in state._live_end_tasks
+        await state.update_live_activity(UNLOCK_EVENT)
+        assert ("d1", "front") not in state._live_end_tasks
+
+    asyncio.run(go())
+
+
+def test_a_pending_start_without_a_token_is_dropped_on_lock(cfg, monkeypatch):
+    import app.main as main
+
+    monkeypatch.setattr(main, "_LIVE_LINGER", 0)
+    state = make_state(cfg)
+    state.store.add_device("d1", "iPhone")
+    state.store.touch_live_start("d1", "front")  # a push-to-start, no token yet
+
     asyncio.run(state.update_live_activity({**UNLOCK, "action": "lock", "source": "auto"}))
 
-    send = state.apns.sent[0]
-    assert send["push_type"] == "end"
-    assert send["payload"]["aps"]["event"] == "end"
+    assert state.apns.sent == []
     assert state.store.live_activities("front") == []
 
 

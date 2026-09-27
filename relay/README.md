@@ -53,8 +53,10 @@ See `../docs/apns.md` for creating the key and choosing sandbox vs production.
 When a door unlocks, the relay also drives a Live Activity on the Lock Screen and
 in the Dynamic Island. If the app is running it has registered the activity's
 per-activity token and the relay just updates it; if not, the relay uses the
-device's push-to-start token. A lock (including auto-relock) ends the activity.
-See `../docs/api.md` for the three registration calls.
+device's push-to-start token. The card's Lock/Unlock button is an App Intent that
+talks to the relay directly. A lock updates the card to "Låst", which lingers for
+about a minute (an undo window) before the relay ends it; unlocking in that
+window cancels the end. See `../docs/api.md` for the three registration calls.
 
 ## Tests
 

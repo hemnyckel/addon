@@ -38,6 +38,9 @@ _ALERT_TTL = 3600
 _LIVE_TTL = 3600
 _LIVE_END_TTL = 300
 _LIVE_START_GRACE = 300
+# After a door locks, keep the (now "Låst") Live Activity around for a short
+# while so its button can flip to "Lås upp" — an undo window — then end it.
+_LIVE_LINGER = 60
 # Upper bound on concurrent pushes, so a busy household can't open thousands
 # of connections at once.
 _MAX_CONCURRENT_PUSHES = 16
@@ -62,6 +65,13 @@ class State:
         self.pair_expires = time.time() + 600
         self.sockets: set[WebSocket] = set()
         self._send_sem = asyncio.Semaphore(_MAX_CONCURRENT_PUSHES)
+        # Pending "end" tasks, keyed by (device, door), for the linger window.
+        self._live_end_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
+
+    def cancel_live_ends(self) -> None:
+        for task in list(self._live_end_tasks.values()):
+            task.cancel()
+        self._live_end_tasks.clear()
 
     # -- incoming events -----------------------------------------------------
     async def on_ha_event(self, event: dict[str, Any]) -> None:
@@ -161,7 +171,7 @@ class State:
             method=ev.get("method"),
         )
         if locked:
-            await self._end_live_activity(door, state)
+            await self._lock_live_activity(door, state)
         else:
             await self._start_or_update_live_activity(
                 door, {"doorID": door.id, "doorName": door.name}, state
@@ -174,6 +184,8 @@ class State:
         existing = {row["device"]: row for row in self.store.live_activities(door.id)}
         sends: list[dict[str, Any]] = []
         for device in self.store.devices():
+            # An unlock cancels any pending "lingering locked" end.
+            self._cancel_live_end(device["id"], door.id)
             row = existing.get(device["id"])
             if row is not None and row["token"]:
                 # The app is up and told us the per-activity token: just update.
@@ -201,9 +213,52 @@ class State:
                 self.store.touch_live_start(device["id"], door.id)
         await self._send_live(sends)
 
-    async def _end_live_activity(self, door: Door, state: dict[str, Any]) -> None:
+    async def _lock_live_activity(self, door: Door, state: dict[str, Any]) -> None:
+        """Show "locked" briefly (so the card can offer Lås upp), then end it."""
         sends: list[dict[str, Any]] = []
         for row in self.store.live_activities(door.id):
+            if not row["token"]:
+                # A push-to-start we never got a token for: nothing to update.
+                self.store.drop_live_activity(row["device"], door.id)
+                continue
+            sends.append(
+                self._live_send(
+                    row["device"], door, row["token"],
+                    live.update_payload(state=state),
+                    push_type="update", priority=10, ttl=_LIVE_TTL,
+                )
+            )
+            self._schedule_live_end(row["device"], door.id, state)
+        await self._send_live(sends)
+
+    def _cancel_live_end(self, device_id: str, door_id: str) -> None:
+        task = self._live_end_tasks.pop((device_id, door_id), None)
+        if task is not None:
+            task.cancel()
+
+    def _schedule_live_end(self, device_id: str, door_id: str, state: dict[str, Any]) -> None:
+        self._cancel_live_end(device_id, door_id)
+        self._live_end_tasks[(device_id, door_id)] = asyncio.create_task(
+            self._linger_then_end(device_id, door_id, state)
+        )
+
+    async def _linger_then_end(self, device_id: str, door_id: str,
+                               state: dict[str, Any]) -> None:
+        try:
+            await asyncio.sleep(_LIVE_LINGER)
+        except asyncio.CancelledError:
+            return
+        self._live_end_tasks.pop((device_id, door_id), None)
+        door = self.cfg.door(door_id)
+        if door is not None:
+            await self._end_live_for_device(device_id, door, state)
+
+    async def _end_live_for_device(self, device_id: str, door: Door,
+                                   state: dict[str, Any]) -> None:
+        sends: list[dict[str, Any]] = []
+        for row in self.store.live_activities(door.id):
+            if row["device"] != device_id:
+                continue
             if row["token"]:
                 sends.append(
                     self._live_send(
@@ -290,6 +345,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         task = asyncio.create_task(state.ha.run())
         yield
         task.cancel()
+        state.cancel_live_ends()
         await state.apns.stop()
 
     app = FastAPI(title="Hemnyckel relay", version="0.1.0", lifespan=lifespan)
