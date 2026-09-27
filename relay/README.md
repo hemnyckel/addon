@@ -39,6 +39,30 @@ sending them — the whole pipeline can be exercised locally.
 
 See `../docs/apns.md` for creating the key and choosing sandbox vs production.
 
+## Security
+
+Everything a phone sends travels over **TLS** to the home (`https://…/hemnyckel/`,
+Let's Encrypt), and Apple Push is the only outbound hop. What protects the rest:
+
+- **Per-device tokens.** Pairing trades a one-time code — single use, ten minutes, rate limited
+  — for a 128-bit token the phone keeps in the Keychain. Every endpoint but `/health` and
+  `/pair` requires it, and the relay enforces roles itself, so the app's UI is never the guard.
+- **No Home Assistant credentials.** The relay reaches Home Assistant through the supervisor,
+  which injects its token; nothing is stored.
+- **Codes are write-only.** A code is never read back, logged or stored; a new one is returned
+  once, to the owner, at creation.
+- **Guests are scoped and they end.** A guest sees only the doors and hours they were given,
+  gets no history and no notifications, is refused entirely once expired — and the lock codes
+  that belong to them are revoked at that same moment.
+- **The APNs key is a file.** Point `apns_key` at the `.p8` in the add-on's `/data` (see
+  [`docs/apns.md`](../docs/apns.md)); it is never pasted into the options, so it does not appear
+  in the add-on form.
+- **The relay's own port (8099) is plain HTTP** on the home network. Always pair from the
+  `https://` address, never a bare one — the device token applies either way, but only TLS
+  keeps it off the wire.
+- **Snapshots include the database.** Home Assistant backups contain the add-on's `/data`,
+  which holds the paired device tokens. Turn on **encrypted backups** if they leave the house.
+
 ## Push behaviour
 
 - One provider JWT (ES256) is minted per key and refreshed every 45 minutes,

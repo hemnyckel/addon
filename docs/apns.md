@@ -6,7 +6,7 @@ push to each paired iPhone. APNs is the only external hop; there is no vendor
 cloud.
 
 ```
-lock → ZHA → nimly journal → relay → APNs (.p8 token) → iPhone
+lock → ZHA → hemnyckel journal → relay → APNs (.p8 token) → iPhone
 ```
 
 ## 1. Apple Developer Program
