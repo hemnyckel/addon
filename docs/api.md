@@ -70,11 +70,38 @@ POST /action          Authorization: Bearer <device_token>
 Actions are forwarded to Home Assistant. If the lock does not confirm, the app
 shows a clear, recoverable state — never a silent success.
 
+## Live Activities
+
+While a door is unlocked, the relay keeps a Live Activity (Lock Screen +
+Dynamic Island) in step with it. All three calls are authenticated with the
+device token:
+
+```
+POST /live/start-token   { "apns_token": "<hex>" }
+  -> 200 { "ok": true }        # the ActivityKit push-to-start token
+
+POST /live/activity      { "door": "front", "apns_token": "<hex>" }
+  -> 200 { "ok": true }        # a running activity's per-activity token
+  -> 400 unknown door
+
+DELETE /live/activity?door=front
+  -> 200 { "ok": true }        # the app ended the activity
+```
+
+The relay owns the start/update/end pushes itself (topic
+`<bundle>.push-type.liveactivity`), driven by the same journal events that
+produce notifications: an unlock starts or updates, a lock (including
+auto-relock) ends.
+
 ## Health
 
 ```
-GET /health -> { "status": "ok", "ha": true, "apns": false, "version": "..." }
+GET /health      -> { "status": "ok", "ha": true, "apns": true, "version": "..." }
+GET /api/health  -> the same
 ```
+
+The root path stays open for probes; `apns` is true only when a real key is
+loaded.
 
 ## Event object
 

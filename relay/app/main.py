@@ -12,8 +12,17 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    WebSocket,
+    WebSocketDisconnect,
+)
 
+from . import live
 from .apns import ApnsClient
 from .config import Config, Door, load_config, normalize_env
 from .events import from_ha
@@ -24,6 +33,11 @@ _LOGGER = logging.getLogger("hemnyckel")
 
 # How long APNs should keep trying to deliver an alert (seconds).
 _ALERT_TTL = 3600
+# Live Activity pushes: how long they stay deliverable, and how long a
+# push-to-start is considered "in flight" before we try again.
+_LIVE_TTL = 3600
+_LIVE_END_TTL = 300
+_LIVE_START_GRACE = 300
 # Upper bound on concurrent pushes, so a busy household can't open thousands
 # of connections at once.
 _MAX_CONCURRENT_PUSHES = 16
@@ -58,6 +72,7 @@ class State:
             self.store.add_event(mapped)
             await self.broadcast(mapped)
             await self.notify(mapped)
+            await self.update_live_activity(mapped)
         except Exception:
             _LOGGER.exception("failed to handle Home Assistant event")
 
@@ -130,6 +145,101 @@ class State:
         for ws in dead:
             self.sockets.discard(ws)
 
+    # -- live activities -----------------------------------------------------
+    async def update_live_activity(self, ev: dict[str, Any]) -> None:
+        """Keep the Lock Screen / Dynamic Island in step with a door."""
+        if not self.cfg.live_enabled:
+            return
+        door = self.cfg.door(ev["door"])
+        if door is None:
+            return
+        locked = ev["action"] != "unlock"
+        state = live.content_state(
+            locked=locked,
+            since=ev["ts"],
+            person=ev.get("person"),
+            method=ev.get("method"),
+        )
+        if locked:
+            await self._end_live_activity(door, state)
+        else:
+            await self._start_or_update_live_activity(
+                door, {"doorID": door.id, "doorName": door.name}, state
+            )
+
+    async def _start_or_update_live_activity(
+        self, door: Door, attributes: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        now = time.time()
+        existing = {row["device"]: row for row in self.store.live_activities(door.id)}
+        sends: list[dict[str, Any]] = []
+        for device in self.store.devices():
+            row = existing.get(device["id"])
+            if row is not None and row["token"]:
+                # The app is up and told us the per-activity token: just update.
+                sends.append(
+                    self._live_send(
+                        device["id"], door, row["token"],
+                        live.update_payload(state=state),
+                        push_type="update", priority=5, ttl=_LIVE_TTL,
+                    )
+                )
+            elif row is not None and now - row["started"] < _LIVE_START_GRACE:
+                continue  # a push-to-start is already in flight; avoid a duplicate
+            elif device["live_start_token"]:
+                sends.append(
+                    self._live_send(
+                        device["id"], door, device["live_start_token"],
+                        live.start_payload(
+                            attributes_type=self.cfg.live_attributes_type,
+                            attributes=attributes,
+                            state=state,
+                        ),
+                        push_type="start", priority=10, ttl=_LIVE_TTL,
+                    )
+                )
+                self.store.touch_live_start(device["id"], door.id)
+        await self._send_live(sends)
+
+    async def _end_live_activity(self, door: Door, state: dict[str, Any]) -> None:
+        sends: list[dict[str, Any]] = []
+        for row in self.store.live_activities(door.id):
+            if row["token"]:
+                sends.append(
+                    self._live_send(
+                        row["device"], door, row["token"],
+                        live.end_payload(state=state),
+                        push_type="end", priority=10, ttl=_LIVE_END_TTL,
+                    )
+                )
+            self.store.drop_live_activity(row["device"], door.id)
+        await self._send_live(sends)
+
+    def _live_send(self, device_id: str, door: Door, token: str, payload: dict[str, Any],
+                   *, push_type: str, priority: int, ttl: int) -> dict[str, Any]:
+        return {
+            "device": device_id, "door": door.id, "token": token, "payload": payload,
+            "push_type": push_type, "priority": priority,
+            "expiration": int(time.time()) + ttl,
+        }
+
+    async def _send_live(self, sends: list[dict[str, Any]]) -> None:
+        topic = live.topic(self.cfg.bundle_id)
+
+        async def one(send: dict[str, Any]) -> None:
+            async with self._send_sem:
+                result = await self.apns.send(
+                    send["token"], send["payload"], push_type=send["push_type"],
+                    priority=send["priority"], topic=topic, expiration=send["expiration"],
+                )
+            if result.invalidate_token:
+                if send["push_type"] == "start":
+                    self.store.set_live_start_token(send["device"], "")
+                else:
+                    self.store.drop_live_activity(send["device"], send["door"])
+
+        await asyncio.gather(*(one(s) for s in sends))
+
     # -- actions -------------------------------------------------------------
     async def do_action(self, door_id: str, action: str) -> dict[str, Any]:
         door = self.cfg.door(door_id)
@@ -185,8 +295,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app = FastAPI(title="Hemnyckel relay", version="0.1.0", lifespan=lifespan)
     # Expose the runtime state for tests and debugging (app.state.hmk).
     app.state.hmk = state
+    # The API lives under /api (as the app and docs expect); /health stays at the
+    # root so the add-on and proxies can probe it directly.
+    api = APIRouter(prefix="/api")
 
-    @app.get("/health")
+    @api.get("/health")
     async def health() -> dict[str, Any]:
         return {
             "status": "ok",
@@ -196,7 +309,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "version": app.version,
         }
 
-    @app.post("/pair")
+    @api.post("/pair")
     async def pair(payload: dict[str, Any]) -> dict[str, Any]:
         code = str(payload.get("code", "")).upper()
         if not code or code != state.pair_code or time.time() > state.pair_expires:
@@ -207,7 +320,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         state.pair_expires = time.time() + 600
         return {"device_token": device_id, "relay_id": "hemnyckel"}
 
-    @app.post("/register")
+    @api.post("/register")
     async def register(payload: dict[str, Any], device: dict = Depends(require_device)) -> dict[str, Any]:
         state.store.set_apns(
             device["id"],
@@ -218,13 +331,13 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         )
         return {"ok": True}
 
-    @app.get("/events")
+    @api.get("/events")
     async def events(_: dict = Depends(require_device), since: float | None = None,
                      door: str | None = None, person: str | None = None,
                      limit: int = 200) -> dict[str, Any]:
         return {"events": state.store.events(since=since, door=door, person=person, limit=limit)}
 
-    @app.get("/state")
+    @api.get("/state")
     async def door_states(_: dict = Depends(require_device)) -> dict[str, Any]:
         doors = [await state.door_state(d) for d in cfg.doors]
         presence: dict[str, str] = {}
@@ -234,11 +347,37 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 presence[ev["person"]] = "home" if ev["action"] == "unlock" else "away"
         return {"doors": doors, "presence": presence, "relay": {"online": True, "apns": state.apns.live}}
 
-    @app.post("/action")
+    @api.post("/action")
     async def action(payload: dict[str, Any], _: dict = Depends(require_device)) -> dict[str, Any]:
         return await state.do_action(str(payload.get("door")), str(payload.get("action")))
 
-    @app.websocket("/ws")
+    # -- live activities (Lock Screen / Dynamic Island) ---------------------
+    @api.post("/live/start-token")
+    async def live_start_token(payload: dict[str, Any],
+                               device: dict = Depends(require_device)) -> dict[str, Any]:
+        """The device's push-to-start token (lets the relay start an activity)."""
+        state.store.set_live_start_token(device["id"], str(payload.get("apns_token") or ""))
+        return {"ok": True}
+
+    @api.post("/live/activity")
+    async def live_activity(payload: dict[str, Any],
+                            device: dict = Depends(require_device)) -> dict[str, Any]:
+        """The per-activity update token the app reports once an activity exists."""
+        door_id = str(payload.get("door") or "")
+        if cfg.door(door_id) is None:
+            raise HTTPException(400, "unknown door")
+        state.store.set_live_activity(
+            device["id"], door_id, str(payload.get("apns_token") or "")
+        )
+        return {"ok": True}
+
+    @api.delete("/live/activity")
+    async def live_activity_end(door: str,
+                                device: dict = Depends(require_device)) -> dict[str, Any]:
+        state.store.drop_live_activity(device["id"], door)
+        return {"ok": True}
+
+    @api.websocket("/ws")
     async def ws(websocket: WebSocket) -> None:
         await websocket.accept()
         state.sockets.add(websocket)
@@ -248,4 +387,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         except WebSocketDisconnect:
             state.sockets.discard(websocket)
 
+    # The same health handler at the root, for probes.
+    app.add_api_route("/health", health)
+    app.include_router(api)
     return app
