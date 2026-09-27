@@ -65,13 +65,11 @@ any other HACS integration.
 
 The integration keeps **only the local half**: ZHA control, slot and credential
 management (PIN, RFID, fingerprint, enrollment, slot names), the guest-code
-services and the **journal** the relay reads. The **vendor cloud is gone**
-(v2.0.0). The **bridge and the emulator** — the parts that keep the vendor app
-in sync — are retired and are removed in the next release (v2.1), as a separate
-deliberate change: they sit inside the mirror engine itself (MQTT, the channel
-system, the emulator entities), so they are a rework of the local engine rather
-than a deletion. The full project stays recoverable from the tags (`v1.0.14` is
-the last complete state).
+services and the **journal** the relay reads. The **vendor cloud** and the
+**bridge and the emulator** — the parts that kept the vendor app in sync, with
+the MQTT layer, the channel system and the emulator entities inside the mirror
+engine — are **gone** as of v2.0.0. The full project stays recoverable from the
+tags (`v1.0.14` is the last complete state).
 
 The relay depends on two things from the integration, so they are part of its
 version requirement: the `hemnyckel_door_event` event, and a stable door key
