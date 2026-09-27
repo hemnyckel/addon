@@ -54,6 +54,15 @@ The buttons are App Intents (`LiveActivityIntent`) that run in the app's process
 call the relay, and only reflect the new state once the lock *confirms* — a
 failed action never looks successful.
 
+## Auto-relock
+
+A lock reports its own relock as `unattributed`, exactly like a manual lock. The
+relay infers it: a lock with no attribution of its own, on a door that was
+unlocked a moment earlier, is labelled `auto` ("Automatiskt"). It appears in
+History, flips the Live Activity to *Låst* (and, while the unlock came from the
+app, opens the "Lås upp" undo window) — but it **never notifies**, so a door that
+relocks itself all day stays quiet.
+
 ## Anti-noise rules
 
 1. Never notify the person who performed the action (unless configured).
