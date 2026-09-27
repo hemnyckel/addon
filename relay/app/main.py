@@ -24,7 +24,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 
-from . import live
+from . import __version__, live
 from .apns import ApnsClient
 from .config import Config, Door, load_config, normalize_env
 from .events import from_ha
@@ -845,7 +845,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         state.cancel_live_ends()
         await state.apns.stop()
 
-    app = FastAPI(title="Hemnyckel relay", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Hemnyckel relay", version=__version__, lifespan=lifespan)
     # Expose the runtime state for tests and debugging (app.state.hmk).
     app.state.hmk = state
     # The API lives under /api (as the app and docs expect); /health stays at the
