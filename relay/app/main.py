@@ -10,6 +10,7 @@ import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import (
@@ -58,6 +59,9 @@ _PAIR_WINDOW = 60
 _PAIR_TTL = 600
 # Roles a device can hold. Guests (a time window and chosen doors) come later.
 _ROLES = {"owner", "user"}
+# The integration's schedule names its weekdays with lowercase three-letter
+# codes, Monday first; the invite stores ISO weekday numbers (Monday = 1).
+_DAY_CODES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 # Upper bound on concurrent pushes, so a busy household can't open thousands
 # of connections at once.
 _MAX_CONCURRENT_PUSHES = 16
@@ -102,6 +106,48 @@ def _json_list(raw: Any) -> list:
     except ValueError:
         return []
     return value if isinstance(value, list) else []
+
+
+def _json_map(raw: Any) -> dict[str, int]:
+    """A JSON object of door -> slot, or an empty map when malformed."""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, slot in value.items():
+        try:
+            result[str(key)] = int(slot)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _schedule_window(days: list[int], from_time: str | None,
+                     to_time: str | None) -> dict[str, Any]:
+    """Map an invite's window to the integration's schedule shape.
+
+    The invite stores ISO weekday numbers (Monday = 1) and "HH:MM"; the
+    integration wants lowercase three-letter day codes and ``start``/``end``.
+    An absent or unusable time becomes the integration's full-day window
+    ("00:00"-"00:00", an end at the start crossing midnight).
+    """
+    start = from_time if _parse_hhmm(from_time or "") is not None else "00:00"
+    end = to_time if _parse_hhmm(to_time or "") is not None else "00:00"
+    return {
+        "days": [_DAY_CODES[d - 1] for d in days if 1 <= d <= 7],
+        "start": start,
+        "end": end,
+    }
+
+
+def _iso_until(expires: float) -> str:
+    """An invite's expiry (epoch seconds) as the ISO timestamp the lock wants."""
+    return datetime.fromtimestamp(expires, tz=UTC).isoformat()
 
 
 def _schedule_ok(device: dict[str, Any], when: float) -> bool:
@@ -690,6 +736,78 @@ class State:
             raise HTTPException(409, "this door's slot table is not known to Home Assistant yet")
         return entry_id
 
+    # -- guest identity: one invitation, matching codes on each door ----------
+    async def create_lock_guest(self, door_id: str, name: str, days: list[int],
+                                from_time: str | None, to_time: str | None,
+                                expires: float) -> dict[str, Any] | None:
+        """Write a matching guest code on one door, best-effort.
+
+        Weekdays mean a recurring guest (the integration enforces the window);
+        without them, a simple guest that expires with the invitation. The
+        name rides on the slot, so a later keypad event attributes to the person.
+
+        Returns ``{"slot", "code", "until"}`` or None when this door's lock
+        cannot take it — the invitation still stands, so an unreachable lock
+        never blocks it. The code is returned to the caller once and is never
+        logged or stored.
+        """
+        try:
+            entry_id = await self.slot_entry_id(door_id)
+        except HTTPException as err:
+            _LOGGER.warning("invite %s: no slot table for door %s (%s)",
+                            name, door_id, err.detail)
+            return None
+        if days:
+            service = "create_recurring_guest"
+            data: dict[str, Any] = {
+                "name": name,
+                "schedule": [_schedule_window(days, from_time, to_time)],
+                "entry_id": entry_id,
+            }
+        else:
+            service = "create_guest_code"
+            data = {"name": name, "entry_id": entry_id, "until": _iso_until(expires)}
+        ok, response = await self.ha.call_service_result("hemnyckel", service, data)
+        if not ok:
+            _LOGGER.warning("invite %s: %s refused on door %s", name, service, door_id)
+            return None
+        row = _service_row(response, entry_id)
+        code = str((row or {}).get("code") or "")
+        slot = (row or {}).get("slot")
+        if not code or slot is None:
+            _LOGGER.warning("invite %s: %s returned no code for door %s",
+                            name, service, door_id)
+            return None
+        return {"slot": int(slot), "code": code, "until": (row or {}).get("until")}
+
+    async def revoke_invite_codes(self, device_id: str) -> None:
+        """Remove the lock codes an invitation created, best-effort.
+
+        Called when a guest device is revoked and when an expired guest is
+        refused. The stored slots are cleared after the attempt, so a refusal
+        revokes once and is not retried on every request; a door that is
+        unreachable never fails the revocation.
+        """
+        invite = self.store.invite_for_device(device_id)
+        if invite is None:
+            return
+        slots = _json_map(invite["slots"])
+        if not slots:
+            return
+        self.store.clear_invite_slots(str(invite["code"]))
+        for door_id, slot in slots.items():
+            try:
+                entry_id = await self.slot_entry_id(door_id)
+            except HTTPException:
+                _LOGGER.warning("revoke: no slot table for door %s", door_id)
+                continue
+            ok = await self.ha.call_service(
+                "hemnyckel", "revoke_guest_code",
+                {"slot": int(slot), "entry_id": entry_id},
+            )
+            if not ok:
+                _LOGGER.warning("revoke: door %s slot %s not reached", door_id, slot)
+
 
 def create_app(cfg: Config | None = None) -> FastAPI:
     cfg = cfg or load_config()
@@ -702,6 +820,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(401, "invalid device token")
         found = dict(device)
         if _guest_expired(found):
+            # Refuse the guest and take the lock codes with them — once, when
+            # the refusal first happens, not on every request that follows.
+            await state.revoke_invite_codes(found["id"])
             raise HTTPException(403, "guest access has expired")
         return found
 
@@ -961,10 +1082,36 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(400, "expires_at must be within the next year")
 
         code = secrets.token_hex(3).upper()
-        state.store.add_invite(code, name, role, doors, days, from_time, to_time, expires)
+        # A guest is one identity: write a matching code on each chosen door
+        # (all doors when the invitation named none), so the same person can
+        # type a code at the door and redeem the invitation in the app.
+        guest_codes: list[dict[str, Any]] = []
+        slots: dict[str, int] = {}
+        if role == "guest":
+            for door_id in doors or [d.id for d in cfg.doors]:
+                try:
+                    created = await state.create_lock_guest(
+                        door_id, name, days, from_time, to_time, expires
+                    )
+                except Exception as err:  # noqa: BLE001 - a lock must not break the invite
+                    _LOGGER.warning("invite %s: door %s failed: %s", name, door_id, err)
+                    continue
+                if created is None:
+                    continue
+                door = cfg.door(door_id)
+                slots[door_id] = int(created["slot"])
+                guest_codes.append({
+                    "door": door_id,
+                    "door_name": door.name if door is not None else door_id,
+                    "slot": int(created["slot"]),
+                    "code": str(created["code"]),
+                    "until": created.get("until"),
+                })
+        state.store.add_invite(code, name, role, doors, days, from_time, to_time,
+                               expires, slots=slots)
         _LOGGER.info("Invite for %s (%s): %s", name, role, code)
         return {"code": code, "role": role, "expires_at": expires,
-                "doors": doors, "days": days}
+                "doors": doors, "days": days, "guest_codes": guest_codes}
 
     @api.delete("/devices/{device_id}")
     async def revoke_device(device_id: str,
@@ -977,6 +1124,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(409, "you cannot remove your own device")
         if target["role"] == "owner" and state.store.owner_count() <= 1:
             raise HTTPException(409, "the last owner cannot be removed")
+        # The guest's lock codes go with their device, best-effort.
+        await state.revoke_invite_codes(device_id)
         state.store.remove_device(device_id)
         return {"ok": True}
 

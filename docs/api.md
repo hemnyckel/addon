@@ -138,13 +138,34 @@ The guest redeems the code with `POST /pair` and becomes a `guest` device.
 
 ```
 POST /invites                    # owner only
-  { "name": "Städning", "doors": ["front"], "expires_in_minutes": 120 }
-  -> 200 { "code": "A1B2C3", "doors": ["front"], "expires_at": 1758... }
+  { "name": "Städning", "role": "guest", "doors": ["front"],
+    "days": [1, 3], "from_time": "08:00", "to_time": "17:00",
+    "expires_at": 1758... }
+  -> 200 { "code": "A1B2C3", "role": "guest", "doors": ["front"],
+           "days": [1, 3], "expires_at": 1758...,
+           "guest_codes": [ { "door": "front", "door_name": "Ytterdörren",
+                              "slot": 6, "code": "4821", "until": null } ] }
 
 DELETE /devices/<id>             # owner only
-  -> 200 { "ok": true }
+  -> 200 { "ok": true }          # also revokes the lock codes it created
   -> 409 you cannot remove your own device, or the last owner
 ```
+
+A guest invitation is **one identity**. Besides the redemption code, the relay
+writes a matching guest code on **each chosen door** through the integration:
+`hemnyckel.create_recurring_guest` when the invitation names weekdays (ISO,
+Monday = 1, mapped to the integration's lowercase three-letter day codes with
+`start`/`end` times), otherwise `hemnyckel.create_guest_code` with the
+invitation's expiry. The guest's name rides on the slot, so a keypad entry
+attributes to them; an invitation with no doors chosen covers every door, and a
+door whose lock cannot be reached gets no code without failing the invitation.
+
+`guest_codes` carries the created code(s) **once**, each with the door they
+belong to. The relay never logs or stores a code — only the slot numbers, so the
+codes can be revoked later. Revoking the guest device, or refusing an expired
+guest, revokes those lock codes best-effort; a door that is unreachable never
+fails the revocation. A guest who *does* install the app redeems `code` (and
+scans its QR) exactly as before.
 
 A guest device:
 

@@ -72,7 +72,8 @@ class Store:
                 to_time TEXT,
                 expires REAL NOT NULL,
                 created REAL NOT NULL,
-                used_by TEXT
+                used_by TEXT,
+                slots TEXT
             );
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -134,6 +135,10 @@ class Store:
             ("days", "ALTER TABLE invites ADD COLUMN days TEXT"),
             ("from_time", "ALTER TABLE invites ADD COLUMN from_time TEXT"),
             ("to_time", "ALTER TABLE invites ADD COLUMN to_time TEXT"),
+            # The lock slot(s) this invitation created, keyed by door id. The
+            # slot is the handle a later revocation needs; the code never lands
+            # here.
+            ("slots", "ALTER TABLE invites ADD COLUMN slots TEXT"),
         ):
             if column not in invite_columns:
                 self._db.execute(ddl)
@@ -283,18 +288,40 @@ class Store:
     # -- invitations (a device is created by the owner in advance) -----------
     def add_invite(self, code: str, name: str, role: str, doors: list[str],
                    days: list[int], from_time: str | None, to_time: str | None,
-                   expires: float) -> None:
+                   expires: float, slots: dict[str, int] | None = None) -> None:
+        """Record an owner's invitation.
+
+        ``slots`` maps each door to the lock slot a matching guest code was
+        written to, so the codes can be revoked with the guest. The code itself
+        is never stored — only the slot number.
+        """
         self._db.execute(
             "INSERT OR REPLACE INTO invites "
-            "(code, name, role, doors, days, from_time, to_time, expires, created) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(code, name, role, doors, days, from_time, to_time, expires, created, slots) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (code, name, role, json.dumps(doors), json.dumps(days),
-             from_time, to_time, expires, time.time()),
+             from_time, to_time, expires, time.time(),
+             json.dumps(slots) if slots else None),
         )
         self._db.commit()
 
     def invite(self, code: str) -> sqlite3.Row | None:
         return self._db.execute("SELECT * FROM invites WHERE code = ?", (code,)).fetchone()
+
+    def invite_for_device(self, device_id: str) -> sqlite3.Row | None:
+        """The invitation a device was created from, if any."""
+        return self._db.execute(
+            "SELECT * FROM invites WHERE used_by = ?", (device_id,)
+        ).fetchone()
+
+    def clear_invite_slots(self, code: str) -> None:
+        """Forget an invitation's lock slots once their codes are revoked.
+
+        Cleared after the attempt, not before: this is what keeps a guest's
+        revocation (or a refusal at expiry) from being retried on every request.
+        """
+        self._db.execute("UPDATE invites SET slots = NULL WHERE code = ?", (code,))
+        self._db.commit()
 
     def use_invite(self, code: str, device_id: str) -> None:
         self._db.execute("UPDATE invites SET used_by = ? WHERE code = ?", (device_id, code))

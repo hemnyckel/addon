@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -474,3 +475,210 @@ def test_the_owner_can_revoke_a_device(cfg):
         assert client.get("/api/state", headers=user).status_code == 401
         # An owner cannot remove their own device, nor the last owner.
         assert client.delete(f"/api/devices/{owner_token}", headers=owner).status_code == 409
+
+
+# -- one guest identity: the invitation and the lock code together -----------
+
+class FakeHa:
+    """A stand-in for HaClient: canned states and recorded service calls."""
+
+    def __init__(self, states: list[dict] | None = None, response=None,
+                 ok: bool = True) -> None:
+        self._states = list(states or [])
+        self.calls: list[tuple[str, str, dict]] = []
+        self.ok = ok
+        self.response = response
+        self.connected = False
+
+    async def run(self) -> None:  # pragma: no cover - parity with HaClient
+        pass
+
+    async def states(self) -> list[dict]:
+        return self._states
+
+    async def entity_state(self, entity_id: str) -> str | None:
+        return None
+
+    async def call_service(self, domain: str, service: str, data: dict) -> bool:
+        self.calls.append((domain, service, data))
+        return self.ok
+
+    async def call_service_result(self, domain: str, service: str, data: dict):
+        self.calls.append((domain, service, data))
+        return self.ok, self.response
+
+
+def guest_sensor_states(*doors: tuple[str, str, str]) -> list[dict]:
+    """A slots sensor per door: the lock's name plus the live entry id."""
+    return [
+        {
+            "entity_id": f"sensor.{door_id}_slots",
+            "state": "0 occupied",
+            "attributes": {"lock": name, "entry_id": entry, "slots": []},
+        }
+        for door_id, name, entry in doors
+    ]
+
+
+def guest_client(cfg, fake: FakeHa, *, two_doors: bool = False):
+    if two_doors:
+        cfg.doors.append(Door(id="back", name="Källardörren", lock_entity="lock.back"))
+    app = create_app(cfg)
+    app.state.hmk.ha = fake
+    return app
+
+
+def pair_owner(client: TestClient, hmk) -> dict:
+    token = client.post("/api/pair",
+                        json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def guest_invite(client: TestClient, owner: dict, **overrides) -> dict:
+    body = {"name": "Städ", "role": "guest", "doors": ["front"],
+            "expires_at": time.time() + 7 * 86400}
+    body.update(overrides)
+    return client.post("/api/invites", headers=owner, json=body).json()
+
+
+def test_a_guest_invitation_writes_a_code_on_each_chosen_door(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front"),
+                                   ("back", "Källardörren", "ent-back")),
+        response={
+            "ent-front": {"slot": 6, "code": "111111", "name": "Städ"},
+            "ent-back": {"slot": 7, "code": "222222", "name": "Städ"},
+        },
+    )
+    app = guest_client(cfg, fake, two_doors=True)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        invite = guest_invite(client, owner, doors=["front", "back"],
+                              days=[1, 3], from_time="08:00", to_time="17:00")
+
+        # Every chosen door gets a recurring guest, with the invite's window
+        # mapped to the integration's schedule shape (ISO weekday -> day code).
+        assert [(c[1], c[2]["entry_id"]) for c in fake.calls] == [
+            ("create_recurring_guest", "ent-front"),
+            ("create_recurring_guest", "ent-back"),
+        ]
+        assert fake.calls[0][2]["name"] == "Städ"
+        assert fake.calls[0][2]["schedule"] == [
+            {"days": ["mon", "wed"], "start": "08:00", "end": "17:00"}
+        ]
+
+        # The codes come back once, each with its door…
+        assert invite["guest_codes"] == [
+            {"door": "front", "door_name": "Ytterdörren", "slot": 6,
+             "code": "111111", "until": None},
+            {"door": "back", "door_name": "Källardörren", "slot": 7,
+             "code": "222222", "until": None},
+        ]
+        # …and only the slots are stored, never a code.
+        stored = dict(app.state.hmk.store.invite(invite["code"]))
+        assert json.loads(stored["slots"]) == {"front": 6, "back": 7}
+        assert "111111" not in json.dumps(stored)
+        assert "222222" not in json.dumps(stored)
+
+
+def test_a_guest_invitation_without_weekdays_writes_a_simple_code(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 5, "code": "123456", "name": "Städ",
+                                "until": "2026-10-01T12:00:00+00:00"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        expires = time.time() + 86400
+        invite = guest_invite(client, owner, expires_at=expires)
+
+        service, data = fake.calls[-1][1], fake.calls[-1][2]
+        assert service == "create_guest_code"
+        assert data["until"] == datetime.fromtimestamp(expires, tz=UTC).isoformat()
+        assert data["entry_id"] == "ent-front"
+        assert invite["guest_codes"][0]["code"] == "123456"
+
+
+def test_a_door_whose_lock_is_unreachable_does_not_break_the_invitation(cfg):
+    fake = FakeHa(states=guest_sensor_states(("front", "Ytterdörren", "ent-front")), ok=False)
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        response = client.post("/api/invites", headers=owner, json={
+            "name": "Städ", "role": "guest", "doors": ["front"],
+            "expires_at": time.time() + 3600,
+        })
+
+        assert response.status_code == 200
+        assert response.json()["guest_codes"] == []
+        assert app.state.hmk.store.invite(response.json()["code"])["slots"] is None
+
+
+def test_only_an_owner_creates_a_guest_and_nothing_reaches_the_lock(cfg):
+    fake = FakeHa(states=guest_sensor_states(("front", "Ytterdörren", "ent-front")))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        pair_owner(client, hmk)
+        user = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "User"}).json()["device_token"]}
+
+        assert client.post("/api/invites", headers=user, json={
+            "name": "Städ", "role": "guest", "doors": ["front"],
+            "expires_at": time.time() + 3600,
+        }).status_code == 403
+        assert fake.calls == []
+
+
+def test_revoking_a_guest_revokes_the_lock_codes(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111", "name": "Städ"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite = guest_invite(client, owner)
+        token = client.post("/api/pair",
+                            json={"code": invite["code"], "name": "Städ"}).json()["device_token"]
+
+        fake.calls.clear()
+        assert client.delete(f"/api/devices/{token}", headers=owner).json() == {"ok": True}
+
+        assert ("hemnyckel", "revoke_guest_code",
+                {"slot": 6, "entry_id": "ent-front"}) in fake.calls
+        # The slots are forgotten with the codes, so nothing is retried.
+        assert hmk.store.invite(invite["code"])["slots"] is None
+        assert client.get("/api/state",
+                          headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+def test_an_expired_guest_revokes_its_code_once(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111", "name": "Städ"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite = guest_invite(client, owner)
+        token = client.post("/api/pair",
+                            json={"code": invite["code"], "name": "Städ"}).json()["device_token"]
+        hmk.store._db.execute("UPDATE devices SET expires = ? WHERE id = ?",
+                              (time.time() - 1, token))
+        hmk.store._db.commit()
+
+        auth = {"Authorization": f"Bearer {token}"}
+        fake.calls.clear()
+        assert client.get("/api/state", headers=auth).status_code == 403
+        revokes = [c for c in fake.calls if c[1] == "revoke_guest_code"]
+        assert revokes == [("hemnyckel", "revoke_guest_code",
+                            {"slot": 6, "entry_id": "ent-front"})]
+
+        # The refusal is honest: it revokes when it refuses, not on every request.
+        fake.calls.clear()
+        assert client.get("/api/state", headers=auth).status_code == 403
+        assert [c for c in fake.calls if c[1] == "revoke_guest_code"] == []

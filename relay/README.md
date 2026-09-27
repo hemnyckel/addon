@@ -86,6 +86,24 @@ lock generated is returned to the app exactly once, in the response, and is gone
 
 See `../docs/api.md` for the five endpoints.
 
+## One guest, one identity
+
+A guest invitation is one person, not two. When an owner invites a guest, the
+relay also writes a matching **guest code on each chosen door** through the
+integration — `hemnyckel.create_recurring_guest` when the invitation has
+weekdays (map the ISO weekdays to the integration's day names and the times to a
+`start`/`end` window), otherwise `hemnyckel.create_guest_code` with the
+invitation's expiry. The guest's name goes on the slot, so a later keypad entry
+attributes to them. An invitation with no doors chosen covers every door, and a
+door whose lock cannot be reached simply gets no code — it never blocks the
+invitation.
+
+The created code(s) are returned **once** in the invite response, each with its
+door, and are never logged or stored; the relay keeps only the slot numbers.
+Revoking the guest device — or refusing an expired guest — revokes those codes
+best-effort, so an unreachable lock never fails the revocation. A guest who
+*does* install the app redeems the invitation code exactly as before.
+
 ## Tests
 
 ```bash

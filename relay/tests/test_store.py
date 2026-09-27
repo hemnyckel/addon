@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 
@@ -67,6 +68,50 @@ def test_migrates_a_database_without_apns_env(tmp_path):
     store = Store(str(tmp_path))
     assert store.device("old")["apns_env"] == "production"
     assert store.device("old")["live_start_token"] is None
+
+
+def test_invite_slots_round_trip_and_are_cleared(tmp_path):
+    """An invitation remembers where its lock codes live, never the codes."""
+    store = Store(str(tmp_path))
+    store.add_invite("A1B2C3", "Städ", "guest", ["front", "back"], [1], "08:00", "17:00",
+                     time.time() + 3600, slots={"front": 6, "back": 7})
+
+    assert json.loads(store.invite("A1B2C3")["slots"]) == {"front": 6, "back": 7}
+
+    store.use_invite("A1B2C3", "dev1")
+    assert store.invite_for_device("dev1")["code"] == "A1B2C3"
+    assert store.invite_for_device("nobody") is None
+
+    store.clear_invite_slots("A1B2C3")
+    assert store.invite("A1B2C3")["slots"] is None
+
+
+def test_migrates_an_invites_table_without_slots(tmp_path):
+    db = tmp_path / "hemnyckel.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE invites (
+            code TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'guest',
+            doors TEXT,
+            days TEXT,
+            from_time TEXT,
+            to_time TEXT,
+            expires REAL NOT NULL,
+            created REAL NOT NULL,
+            used_by TEXT
+        );
+        """
+    )
+    con.commit()
+    con.close()
+
+    store = Store(str(tmp_path))
+    store.add_invite("X", "N", "guest", [], [], None, None, time.time() + 1,
+                     slots={"front": 6})
+    assert json.loads(store.invite("X")["slots"]) == {"front": 6}
 
 
 def test_events_are_bounded_and_queryable(tmp_path):
