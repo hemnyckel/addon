@@ -126,7 +126,9 @@ def test_presence_follows_each_person_not_each_door(tmp_path):
     store.add_event(event(4, id="d", door="back", person="Pappa", action="lock"))
 
     # Elise is still home: the automatic relock carries no person.
-    assert store.presence() == {"Elise": "home", "Pappa": "away"}
+    now = store.presence()
+    assert now["Elise"]["state"] == "home" and now["Elise"]["source"] == "lock"
+    assert now["Pappa"]["state"] == "away"
 
 
 def test_presence_merges_lock_events_and_geofence_reports(tmp_path):
@@ -136,11 +138,12 @@ def test_presence_merges_lock_events_and_geofence_reports(tmp_path):
     # An unlock a while ago, then a geofence report just now: she has left.
     store.add_event(event(1, id="a", person="Elise", action="unlock", ts=now - 600))
     store.set_presence("Elise", "away")
-    assert store.presence()["Elise"] == "away"
+    assert store.presence()["Elise"]["state"] == "away"
+    assert store.presence()["Elise"]["source"] == "geofence"
 
     # The other way round: a report, then a fresh unlock: he is home again.
     store.add_event(event(2, id="b", person="Pappa", action="lock", ts=now - 600))
     store.set_presence("Pappa", "away")
     store._db.execute("UPDATE presence SET updated = ? WHERE person = 'Pappa'", (now - 300,))
     store.add_event(event(3, id="c", person="Pappa", action="unlock", ts=now - 10))
-    assert store.presence()["Pappa"] == "home"
+    assert store.presence()["Pappa"] == {"state": "home", "source": "lock", "at": now - 10}

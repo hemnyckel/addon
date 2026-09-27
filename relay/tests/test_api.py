@@ -172,7 +172,7 @@ def test_a_phone_reports_presence_and_the_owner_sets_home(cfg):
         client.post("/api/register", headers=owner, json={"apns_token": "", "person": "Claes"})
         assert client.post("/api/presence", headers=owner,
                            json={"state": "away"}).json() == {"ok": True}
-        assert hmk.store.presence().get("Claes") == "away"
+        assert hmk.store.presence().get("Claes", {}).get("state") == "away"
         assert client.post("/api/presence", headers=owner,
                            json={"state": "maybe"}).status_code == 400
 
@@ -216,8 +216,8 @@ def test_a_family_member_invitation_makes_a_user(cfg):
                             json={"code": invite["code"], "name": "Elsas iPhone"}).json()["device_token"]
         row = hmk.store.device(token)
         assert row["role"] == "user"
-        assert row["name"] == "Elsa"          # the invitation names the person
-        assert row["person"] == "Elsa"        # …so "who opened" works from the start
+        assert row["name"] == "Elsas iPhone"  # the phone names itself
+        assert row["person"] == "Elsa"        # the invitation names the person
         assert not row["expires"]             # permanent
         assert client.get("/api/state",
                           headers={"Authorization": f"Bearer {token}"}).json()["role"] == "user"
@@ -271,6 +271,41 @@ def test_a_guest_time_window_is_enforced(cfg):
                               json={"door": "front", "action": "unlock"})
         assert refused.status_code == 403
         assert refused.json()["detail"] == "outside the guest's hours"
+
+
+def test_people_group_devices_and_set_a_role_once(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Pappas iPhone"}).json()["device_token"]}
+        client.post("/api/register", headers=owner, json={"apns_token": "", "person": "Pappa"})
+
+        # Two devices for Elsa, from two nameless invitations.
+        for name in ("Elsas iPhone", "Elsas iPad"):
+            invite = client.post("/api/invites", headers=owner,
+                                 json={"role": "user", "expires_at": time.time() + 3600}).json()
+            token = client.post("/api/pair",
+                                json={"code": invite["code"], "name": name}).json()["device_token"]
+            client.post("/api/register", headers={"Authorization": f"Bearer {token}"},
+                        json={"apns_token": "", "person": "Elsa"})
+
+        people = client.get("/api/people", headers=owner).json()["people"]
+        elsa = next(p for p in people if p["name"] == "Elsa")
+        assert [d["name"] for d in elsa["devices"]] == ["Elsas iPhone", "Elsas iPad"]
+        assert elsa["role"] == "user"
+
+        # The role is set once for the person, and the last owner is protected.
+        assert client.post("/api/people/Pappa/role", headers=owner,
+                           json={"role": "user"}).status_code == 409
+
+        assert client.post("/api/people/Elsa/role", headers=owner,
+                           json={"role": "owner"}).json() == {"ok": True}
+        assert all(hmk.store.device(d["id"])["role"] == "owner" for d in elsa["devices"])
+
+        # With two owners, one may step down.
+        assert client.post("/api/people/Pappa/role", headers=owner,
+                           json={"role": "user"}).json() == {"ok": True}
 
 
 def test_a_nameless_family_invitation_is_fine(cfg):

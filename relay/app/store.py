@@ -16,6 +16,16 @@ def _row(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
+def _json_list(raw: Any) -> list:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return []
+    return value if isinstance(value, list) else []
+
+
 class Store:
     def __init__(self, data_dir: str) -> None:
         os.makedirs(data_dir, exist_ok=True)
@@ -164,6 +174,57 @@ class Store:
     def set_role(self, device_id: str, role: str) -> None:
         self._db.execute("UPDATE devices SET role = ? WHERE id = ?", (role, device_id))
         self._db.commit()
+
+    def set_role_for_person(self, person: str, role: str) -> None:
+        """A role belongs to the person, not to each of their phones."""
+        self._db.execute("UPDATE devices SET role = ? WHERE person = ?", (role, person))
+        self._db.commit()
+
+    def owner_devices(self, person: str | None = None) -> int:
+        if person is None:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS c FROM devices WHERE role = 'owner'"
+            ).fetchone()
+        else:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS c FROM devices WHERE role = 'owner' AND person = ?",
+                (person,),
+            ).fetchone()
+        return int(row["c"])
+
+    def people(self) -> list[dict[str, Any]]:
+        """People, each with their devices — the shape the Personer screen needs."""
+        groups: dict[str, dict[str, Any]] = {}
+        for row in self._db.execute("SELECT * FROM devices ORDER BY created"):
+            person = str(row["person"] or "").strip()
+            group = groups.get(person) if person else None
+            if group is None:
+                group = {
+                    "name": person,
+                    "role": row["role"],
+                    "doors": _json_list(row["doors"]) or None,
+                    "days": _json_list(row["days"]) or None,
+                    "from_time": row["from_time"],
+                    "to_time": row["to_time"],
+                    "expires": row["expires"],
+                    "devices": [],
+                }
+                groups[person or f"#{row['id']}"] = group
+            elif row["role"] == "owner" or (row["role"] == "guest"
+                                            and group["role"] == "user"):
+                # A person's role is the strongest of their devices.
+                group["role"] = row["role"]
+            group["devices"].append({
+                "id": row["id"],
+                "name": row["name"],
+                "device_model": row["device_model"],
+                "device_os": row["device_os"],
+                "created": row["created"],
+            })
+        return sorted(
+            groups.values(),
+            key=lambda group: (not group["name"], group["name"] or group["devices"][0]["name"]),
+        )
 
     def add_guest(self, device_id: str, name: str, doors: list[str],
                   expires: float) -> None:
@@ -339,28 +400,34 @@ class Store:
         ).fetchone()
         return None if row is None else _row(row)
 
-    def presence(self) -> dict[str, str]:
-        """Each person's last known state.
+    def presence(self) -> dict[str, dict[str, Any]]:
+        """Each person's last known state, with where that knowledge comes from.
 
         Two signals, latest wins: a lock event attributed to them (an unlock is
         an arrival, a lock a departure) and an explicit report from their phone
-        (the home geofence). Per person, so an automatic relock — which carries
-        no person — can never make someone disappear.
+        (the home geofence). The source travels with it, so the app can tell
+        "inside the zone" from "last unlocked here".
         """
-        latest: dict[str, tuple[float, str]] = {}
+        latest: dict[str, tuple[float, dict[str, Any]]] = {}
         for row in self._db.execute(
             "SELECT person, action, ts FROM events WHERE person IS NOT NULL ORDER BY ts"
         ):
-            latest[str(row["person"])] = (
-                float(row["ts"]),
-                "home" if row["action"] == "unlock" else "away",
-            )
+            moment = float(row["ts"])
+            latest[str(row["person"])] = (moment, {
+                "state": "home" if row["action"] == "unlock" else "away",
+                "source": "lock",
+                "at": moment,
+            })
         for row in self._db.execute("SELECT person, state, updated FROM presence"):
             person = str(row["person"])
-            ts = float(row["updated"])
-            if person not in latest or ts > latest[person][0]:
-                latest[person] = (ts, str(row["state"]))
-        return {person: state for person, (_, state) in latest.items()}
+            moment = float(row["updated"])
+            if person not in latest or moment > latest[person][0]:
+                latest[person] = (moment, {
+                    "state": str(row["state"]),
+                    "source": "geofence",
+                    "at": moment,
+                })
+        return {person: value for person, (_, value) in latest.items()}
 
     def set_presence(self, person: str, state: str) -> None:
         self._db.execute(

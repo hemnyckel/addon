@@ -589,8 +589,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             invited_name = str(invite["name"] or "").strip()
             state.store.add_invited(
                 device_id,
-                # A nameless family invitation still knows which phone it is.
-                invited_name or str(payload.get("name") or "Enhet"),
+                # The phone names itself; the invitation names the person.
+                str(payload.get("name") or invited_name or "Enhet"),
                 role,
                 [str(d) for d in _json_list(invite["doors"])],
                 [int(d) for d in _json_list(invite["days"]) if str(d).isdigit()],
@@ -714,6 +714,22 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         code = state.new_pair_code()
         _LOGGER.info("Pairing code: %s (expires in 10 min)", code)
         return {"code": code, "expires_in": _PAIR_TTL}
+
+    @api.get("/people")
+    async def list_people(_: dict = Depends(require_owner)) -> dict[str, Any]:
+        """People with their devices — the Personer screen."""
+        return {"people": state.store.people()}
+
+    @api.post("/people/{person}/role")
+    async def set_person_role(person: str, payload: dict[str, Any],
+                              _: dict = Depends(require_owner)) -> dict[str, Any]:
+        role = str(payload.get("role") or "").lower()
+        if role not in _ROLES:
+            raise HTTPException(400, f"role must be one of {sorted(_ROLES)}")
+        if role != "owner" and state.store.owner_devices() - state.store.owner_devices(person) < 1:
+            raise HTTPException(409, "the last owner cannot be demoted")
+        state.store.set_role_for_person(person, role)
+        return {"ok": True}
 
     @api.get("/devices")
     async def list_devices(_: dict = Depends(require_owner)) -> dict[str, Any]:
