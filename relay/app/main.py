@@ -61,6 +61,11 @@ _ROLES = {"owner", "user"}
 # Upper bound on concurrent pushes, so a busy household can't open thousands
 # of connections at once.
 _MAX_CONCURRENT_PUSHES = 16
+# One clean, human answer when Home Assistant or the lock will not take a call;
+# the raw upstream error never reaches the app.
+_UPSTREAM_ERROR = "the lock is not reachable right now; try again"
+# Credential-kind labels used to derive marks from the individual booleans.
+_CREDENTIAL_KINDS = (("pin", "has_pin"), ("fingerprint", "has_fingerprint"), ("rfid", "has_rfid"))
 
 
 def _prefs(raw: str | None) -> dict[str, Any]:
@@ -156,6 +161,123 @@ def _wants(prefs: dict[str, Any], ev: dict[str, Any]) -> bool:
         return True  # always, even in quiet hours
     return not _in_quiet(prefs, ev["ts"])
 
+
+# -- slots: the lock's code table, resolved from Home Assistant --------------
+
+def _attributes(state: dict[str, Any]) -> dict[str, Any]:
+    attrs = state.get("attributes")
+    return attrs if isinstance(attrs, dict) else {}
+
+
+# The entity name each slot sensor carries, for the fallback below.
+_SENSOR_LABEL = {"_slots": "Slots", "_lock_facts": "Lock facts"}
+
+
+def _slot_sensor(states: list[dict[str, Any]], door: Door,
+                 suffix: str) -> dict[str, Any] | None:
+    """Find a door's sensor by the lock name it carries, then by entry id.
+
+    The slots and lock-facts sensors both carry the lock's human name (the same
+    one a household sees, e.g. "Ytterdörren"). The live entry id — not the one
+    in the relay's config, which is a stale hint — is what a service call needs,
+    so it is read from the sensor itself.
+    """
+    matches = [
+        state for state in states
+        if str(state.get("entity_id") or "").startswith("sensor.")
+        and str(state.get("entity_id") or "").endswith(suffix)
+    ]
+    for state in matches:
+        if _attributes(state).get("lock") == door.name:
+            return state
+    # The integration names the entity after the lock ("Ytterdörren Slots"), so
+    # the friendly name identifies it even without an explicit lock attribute.
+    label = _SENSOR_LABEL.get(suffix)
+    if label:
+        wanted = f"{door.name} {label}"
+        for state in matches:
+            if _attributes(state).get("friendly_name") == wanted:
+                return state
+    if door.entry_id:
+        for state in matches:
+            if _attributes(state).get("entry_id") == door.entry_id:
+                return state
+    return None
+
+
+def _lock_facts(states: list[dict[str, Any]], door: Door,
+                slots_state: dict[str, Any], entry_id: str) -> dict[str, Any] | None:
+    """The matching lock-facts attributes, if the lock has reported them."""
+    entity_id = str(slots_state.get("entity_id") or "")
+    if entity_id.endswith("_slots"):
+        sibling = entity_id[: -len("_slots")] + "_lock_facts"
+        for state in states:
+            if state.get("entity_id") == sibling:
+                return _attributes(state)
+    facts_state = _slot_sensor(states, door, "_lock_facts")
+    if facts_state is None:
+        # On an older sensor that carries no name: match by the entry id.
+        facts_state = next(
+            (state for state in states
+             if str(state.get("entity_id") or "").startswith("sensor.")
+             and str(state.get("entity_id") or "").endswith("_lock_facts")
+             and entry_id
+             and _attributes(state).get("entry_id") == entry_id),
+            None,
+        )
+    return _attributes(facts_state) if facts_state is not None else None
+
+
+def _capacity(facts: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not facts:
+        return None
+    return {
+        "pin": facts.get("pin_users"),
+        "rfid": facts.get("rfid_users"),
+        "total": facts.get("total_users"),
+    }
+
+
+def _slot_rows(attrs: dict[str, Any], door_id: str) -> list[dict[str, Any]]:
+    """The lock's slot table, sorted by number, with names and credential marks."""
+    rows: list[dict[str, Any]] = []
+    for raw in attrs.get("slots") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            number = int(raw["slot"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        name = str(raw.get("name") or "")
+        marks = {
+            "has_pin": bool(raw.get("has_pin")),
+            "has_fingerprint": bool(raw.get("has_fingerprint")),
+            "has_rfid": bool(raw.get("has_rfid")),
+        }
+        credentials = raw.get("credentials")
+        if not isinstance(credentials, list):
+            credentials = [kind for kind, key in _CREDENTIAL_KINDS if marks[key]]
+        rows.append({
+            "slot": number,
+            "door": door_id,
+            "name": name,
+            "occupied": bool(name) or bool(credentials),
+            **marks,
+            "finger_used": bool(raw.get("finger_used")),
+            "credentials": [str(kind) for kind in credentials],
+        })
+    rows.sort(key=lambda row: row["slot"])
+    return rows
+
+
+def _service_row(response: Any, entry_id: str) -> dict[str, Any] | None:
+    """Pick one entry's record out of a Home Assistant service response."""
+    if not isinstance(response, dict):
+        return None
+    row = response.get(entry_id)
+    if isinstance(row, dict):
+        return row
+    return next((value for value in response.values() if isinstance(value, dict)), None)
 
 
 class State:
@@ -523,6 +645,47 @@ class State:
             "last_event": self.store.last_event(door.id),
         }
 
+    # -- slots: the lock's code table ----------------------------------------
+    async def slots_snapshot(self, door_id: str) -> dict[str, Any]:
+        """One door's slot table, resolved live from Home Assistant's states."""
+        door = self.cfg.door(door_id)
+        if door is None:
+            raise HTTPException(400, "unknown door")
+        states = await self.ha.states()
+        slots_state = _slot_sensor(states, door, "_slots")
+        if slots_state is None:
+            # The door exists, the lock has not reported a slot table (yet).
+            return {"door": door.id, "name": door.name, "capacity": None, "slots": []}
+        attrs = _attributes(slots_state)
+        entry_id = str(attrs.get("entry_id") or door.entry_id or "")
+        facts = _lock_facts(states, door, slots_state, entry_id)
+        return {
+            "door": door.id,
+            "name": door.name,
+            "capacity": _capacity(facts),
+            "slots": _slot_rows(attrs, door.id),
+        }
+
+    async def slot_entry_id(self, door_id: str) -> str:
+        """The live config entry id for a door, read from Home Assistant.
+
+        The integration re-mints an entry id whenever its entry is re-created,
+        so the config's value is only a fallback; the slots sensor carries the
+        one a service call must use today.
+        """
+        door = self.cfg.door(door_id)
+        if door is None:
+            raise HTTPException(400, "unknown door")
+        states = await self.ha.states()
+        slots_state = _slot_sensor(states, door, "_slots")
+        entry_id = ""
+        if slots_state is not None:
+            entry_id = str(_attributes(slots_state).get("entry_id") or "")
+        entry_id = entry_id or door.entry_id or ""
+        if not entry_id:
+            raise HTTPException(409, "this door's slot table is not known to Home Assistant yet")
+        return entry_id
+
 
 def create_app(cfg: Config | None = None) -> FastAPI:
     cfg = cfg or load_config()
@@ -827,6 +990,88 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(409, "the last owner cannot be demoted")
         state.store.set_role(device_id, role)
         return {"ok": True}
+
+    # -- slots & codes (owner only) ------------------------------------------
+    # The lock's slots are where the journal gets its attribution: a named slot
+    # is what turns "slot 6" into "Elise". Only an owner manages them.
+    @api.get("/slots")
+    async def list_slots(door: str, _: dict = Depends(require_owner)) -> dict[str, Any]:
+        return await state.slots_snapshot(door)
+
+    @api.post("/slots/{slot}/name")
+    async def name_slot(slot: int, payload: dict[str, Any],
+                        _: dict = Depends(require_owner)) -> dict[str, Any]:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "a name is required")
+        entry_id = await state.slot_entry_id(str(payload.get("door") or ""))
+        ok = await state.ha.call_service(
+            "hemnyckel", "set_slot_name",
+            {"slot": slot, "name": name, "entry_id": entry_id},
+        )
+        if not ok:
+            raise HTTPException(502, _UPSTREAM_ERROR)
+        return {"ok": True, "slot": slot, "name": name}
+
+    @api.post("/slots/{slot}/code")
+    async def create_slot_code(slot: int, payload: dict[str, Any],
+                               _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Write a code to a slot and return it exactly once.
+
+        The code is write-only: it is never read back, logged or stored. When
+        the caller supplies none, the lock's own generator makes one and the
+        service response carries it — this response is the only place it lives.
+        """
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "a name is required")
+        entry_id = await state.slot_entry_id(str(payload.get("door") or ""))
+        data: dict[str, Any] = {"slot": slot, "name": name, "entry_id": entry_id}
+        if payload.get("code"):
+            data["code"] = str(payload["code"])
+        if payload.get("until"):
+            data["until"] = str(payload["until"])
+        ok, response = await state.ha.call_service_result(
+            "hemnyckel", "create_guest_code", data
+        )
+        if not ok:
+            raise HTTPException(502, _UPSTREAM_ERROR)
+        created = _service_row(response, entry_id)
+        code = str((created or {}).get("code") or "")
+        if not code:
+            raise HTTPException(502, _UPSTREAM_ERROR)
+        return {
+            "ok": True,
+            "slot": int((created or {}).get("slot") or slot),
+            "name": str((created or {}).get("name") or name),
+            "until": (created or {}).get("until"),
+            "code": code,
+        }
+
+    @api.post("/slots/{slot}/finger")
+    async def enroll_finger(slot: int, payload: dict[str, Any],
+                            _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Light the lock's reader so the person can touch it at the door."""
+        entry_id = await state.slot_entry_id(str(payload.get("door") or ""))
+        ok, _response = await state.ha.call_service_result(
+            "hemnyckel", "enroll_fingerprint",
+            {"slot": slot, "entry_id": entry_id},
+        )
+        if not ok:
+            raise HTTPException(502, _UPSTREAM_ERROR)
+        return {"ok": True, "slot": slot}
+
+    @api.delete("/slots/{slot}")
+    async def clear_slot(slot: int, door: str,
+                         _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Clear a slot's credential on the lock, and forget its name."""
+        entry_id = await state.slot_entry_id(door)
+        ok = await state.ha.call_service(
+            "hemnyckel", "clear_slot", {"slot": slot, "entry_id": entry_id}
+        )
+        if not ok:
+            raise HTTPException(502, _UPSTREAM_ERROR)
+        return {"ok": True, "slot": slot}
 
     @api.post("/action")
     async def action(payload: dict[str, Any],

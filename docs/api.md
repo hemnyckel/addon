@@ -153,6 +153,48 @@ A guest device:
 - is **never notified** and registers no push tokens;
 - is refused entirely once `expires` has passed (403).
 
+## Slots & codes (owner only)
+
+The lock's slots are where attribution comes from: a **named slot** is what turns
+a journal entry into "Elise" instead of "slot 6". These five endpoints are owner
+only; the relay resolves each door's slot table from Home Assistant's states
+(the `sensor.*_slots` whose `lock` attribute is the door's name, using its
+`entry_id` for the service call) and forwards the matching `hemnyckel.*` service.
+
+```
+GET /slots?door=front
+  -> 200 {
+      "door": "front", "name": "Ytterdörren",
+      "capacity": { "pin": 50, "rfid": 50, "total": 100 },
+      "slots": [
+        { "slot": 4, "door": "front", "name": "", "occupied": true,
+          "has_pin": false, "has_fingerprint": true, "has_rfid": false,
+          "finger_used": false, "credentials": ["fingerprint"] }
+      ]
+    }
+  -> 400 unknown door
+
+POST /slots/6/name        { "door": "front", "name": "Elise" }
+  -> 200 { "ok": true, "slot": 6, "name": "Elise" }
+
+POST /slots/6/code        { "door": "front", "name": "Elise", "code": "4821", "until": "..." }
+  -> 200 { "ok": true, "slot": 6, "name": "Elise", "until": null, "code": "4821" }
+  -> 400 a name is required
+
+POST /slots/6/finger      { "door": "front" }
+  -> 200 { "ok": true, "slot": 6 }        # the reader lights; touch it at the door
+
+DELETE /slots/6?door=front
+  -> 200 { "ok": true, "slot": 6 }
+```
+
+`code` and `until` are optional on a code call; when no `code` is given the lock
+generates one and it is returned **exactly once** in this response. A code is
+**write-only**: the relay never reads, logs or stores it. If Home Assistant or
+the lock does not accept a call, the answer is a clean `502
+{"detail": "the lock is not reachable right now; try again"}` — never a raw
+upstream error.
+
 ## Presence
 
 Every phone watches a geofence around the house and reports when it comes and

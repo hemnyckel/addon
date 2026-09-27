@@ -58,6 +58,21 @@ talks to the relay directly. A lock updates the card to "Låst", which lingers f
 about a minute (an undo window) before the relay ends it; unlocking in that
 window cancels the end. See `../docs/api.md` for the three registration calls.
 
+## Codes (slots)
+
+The lock's **slots** are where the journal gets its attribution: a named slot is
+what turns an event into "Elise" instead of "slot 6". Owners manage them from the
+app, which talks to the relay; the relay resolves each door's slot table from
+Home Assistant (the `sensor.*_slots` whose `lock` attribute is the door's name,
+using its `entry_id` for the service call) and forwards the
+`hemnyckel.set_slot_name` / `create_guest_code` / `enroll_fingerprint` /
+`clear_slot` services.
+
+A code is **write-only**: the relay never reads, logs or stores it. A code the
+lock generated is returned to the app exactly once, in the response, and is gone.
+
+See `../docs/api.md` for the five endpoints.
+
 ## Tests
 
 ```bash

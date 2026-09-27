@@ -90,6 +90,55 @@ class HaClient:
             return False
         return True
 
+    async def call_service_result(
+        self, domain: str, service: str, data: dict[str, Any]
+    ) -> tuple[bool, Any]:
+        """Call a service that returns data (`?return_response`).
+
+        Returns ``(accepted, service_response)``. A transport error or an
+        upstream 4xx/5xx is reported as a clean ``False`` so the caller can
+        answer with a human message instead of leaking Home Assistant's error.
+        """
+        if self._http is None:
+            _LOGGER.info("[dev] would call %s.%s %s", domain, service, data)
+            return True, None
+        try:
+            resp = await self._http.post(
+                f"/api/services/{domain}/{service}?return_response",
+                json=data,
+                headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
+            )
+        except httpx.HTTPError as err:
+            _LOGGER.warning("HA %s.%s failed (%s)", domain, service, err)
+            return False, None
+        if resp.status_code >= 400:
+            _LOGGER.warning("HA %s.%s -> %s %s", domain, service, resp.status_code, resp.text[:200])
+            return False, None
+        try:
+            body = resp.json()
+        except ValueError:
+            return True, None
+        # Home Assistant wraps a service response under "service_response".
+        if isinstance(body, dict) and "service_response" in body:
+            return True, body.get("service_response")
+        return True, body
+
+    async def states(self) -> list[dict[str, Any]]:
+        """Every entity state, for resolving a door's sensors by attribute."""
+        if self._http is None:
+            return []
+        resp = await self._http.get(
+            "/api/states",
+            headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
+        )
+        if resp.status_code != 200:
+            return []
+        try:
+            body = resp.json()
+        except ValueError:
+            return []
+        return body if isinstance(body, list) else []
+
     async def entity_state(self, entity_id: str) -> str | None:
         if self._http is None:
             return None
