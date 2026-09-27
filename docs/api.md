@@ -24,12 +24,15 @@ Codes are single-use and expire after a few minutes.
 
 ```
 POST /register        Authorization: Bearer <device_token>
-  { "apns_token": "<hex>", "person": "claes", "prefs": {...} }
+  { "apns_token": "<hex>", "person": "claes", "apns_env": "development", "prefs": {...} }
   -> 200 { "ok": true }
 ```
 
 `apns_token` is the Apple device token. `person` links the device to a family
-member so notifications can be targeted. `prefs` is a small object (see below).
+member so notifications can be targeted. `apns_env` is `development` (Xcode debug
+builds, APNs sandbox) or `production` (TestFlight / App Store); the relay stores
+it per device and sends to the matching APNs host. `prefs` is a small object (see
+below).
 
 ## Events
 
