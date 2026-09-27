@@ -334,6 +334,7 @@ class State:
             since=ev["ts"],
             person=ev.get("person"),
             method=ev.get("method"),
+            source=ev.get("source"),
         )
         if locked:
             await self._lock_live_activity(door, state)

@@ -30,12 +30,15 @@ def topic(bundle_id: str) -> str:
 
 
 def content_state(*, locked: bool, since: float, person: str | None = None,
-                  method: str | None = None, open_: bool | None = None) -> dict[str, Any]:
+                  method: str | None = None, open_: bool | None = None,
+                  source: str | None = None) -> dict[str, Any]:
     return {
         "locked": locked,
         "open": open_,
         "person": person,
         "method": method,
+        # The code, so the device can translate the method itself.
+        "source": source,
         "since": since,
     }
 

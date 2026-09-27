@@ -14,6 +14,7 @@ def test_content_state_uses_plain_json():
         "open": None,
         "person": "Elise",
         "method": "Kod",
+        "source": None,
         "since": 1700000000.5,
     }
 
