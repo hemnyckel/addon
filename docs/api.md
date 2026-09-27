@@ -123,8 +123,30 @@ POST /pair-code                  # owner only; a fresh code for a new device
   -> 200 { "code": "A1B2C3", "expires_in": 600 }
 ```
 
-`GET /state` also carries the caller's `role`, so the app can show only what it
-may.
+`GET /state` also carries the caller's `role`, `device_id` and — for a guest —
+`expires`, so the app can show only what the role may.
+
+### Guests
+
+An owner invites a guest with a **name, the doors they may use and a window**.
+The guest redeems the code with `POST /pair` and becomes a `guest` device.
+
+```
+POST /invites                    # owner only
+  { "name": "Städning", "doors": ["front"], "expires_in_minutes": 120 }
+  -> 200 { "code": "A1B2C3", "doors": ["front"], "expires_at": 1758... }
+
+DELETE /devices/<id>             # owner only
+  -> 200 { "ok": true }
+  -> 409 you cannot remove your own device, or the last owner
+```
+
+A guest device:
+
+- sees **no history** (`GET /events` → `[]`) and **no presence**;
+- sees and acts on **only their doors** (`POST /action` → 403 otherwise);
+- is **never notified** and registers no push tokens;
+- is refused entirely once `expires` has passed (403).
 
 ## Health
 

@@ -71,6 +71,24 @@ def _prefs(raw: str | None) -> dict[str, Any]:
         return {}
 
 
+def _device_doors(device: dict[str, Any]) -> list[str] | None:
+    """The doors a guest may use, or None meaning "all"."""
+    raw = device.get("doors")
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    return [str(v) for v in value] if isinstance(value, list) else None
+
+
+def _guest_expired(device: dict[str, Any]) -> bool:
+    expires = device.get("expires")
+    return bool(device.get("role") == "guest" and expires is not None
+                and time.time() > float(expires))
+
+
 
 class State:
     def __init__(self, cfg: Config) -> None:
@@ -223,6 +241,8 @@ class State:
 
         targets = []
         for device in self.store.devices():
+            if device["role"] == "guest":
+                continue  # a guest is not notified
             if not device["apns_token"]:
                 continue
             prefs = _prefs(device["prefs"])
@@ -285,6 +305,8 @@ class State:
         existing = {row["device"]: row for row in self.store.live_activities(door.id)}
         sends: list[dict[str, Any]] = []
         for device in self.store.devices():
+            if device["role"] == "guest":
+                continue  # no push-driven Live Activity for guests
             # An unlock cancels any pending "lingering locked" end.
             self._cancel_live_end(device["id"], door.id)
             row = existing.get(device["id"])
@@ -440,7 +462,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         device = state.store.device(token) if token else None
         if device is None:
             raise HTTPException(401, "invalid device token")
-        return dict(device)
+        found = dict(device)
+        if _guest_expired(found):
+            raise HTTPException(403, "guest access has expired")
+        return found
 
     async def require_owner(device: dict = Depends(require_device)) -> dict:
         if device.get("role") != "owner":
@@ -481,7 +506,21 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not state.pairing_allowed(client):
             raise HTTPException(429, "too many pairing attempts; try again shortly")
         code = str(payload.get("code", "")).upper()
-        if not code or code != state.pair_code or time.time() > state.pair_expires:
+        if not code:
+            raise HTTPException(401, "invalid or expired code")
+
+        # An invitation, created by the owner, carries the guest's name, doors
+        # and window — it is what the guest redeems.
+        invite = state.store.invite(code)
+        if invite is not None and not invite["used_by"] and time.time() <= invite["expires"]:
+            device_id = uuid.uuid4().hex
+            doors = [str(d) for d in json.loads(invite["doors"] or "[]")]
+            state.store.add_guest(device_id, invite["name"], doors, invite["expires"])
+            state.store.use_invite(code, device_id)
+            _LOGGER.info("Guest %s paired (doors=%s)", invite["name"], doors)
+            return {"device_token": device_id, "relay_id": "hemnyckel"}
+
+        if code != state.pair_code or time.time() > state.pair_expires:
             raise HTTPException(401, "invalid or expired code")
         device_id = uuid.uuid4().hex
         # The first device to pair owns the install; everyone after is a user.
@@ -504,24 +543,35 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"ok": True}
 
     @api.get("/events")
-    async def events(_: dict = Depends(require_device), since: float | None = None,
+    async def events(device: dict = Depends(require_device), since: float | None = None,
                      door: str | None = None, person: str | None = None,
                      limit: int = 200) -> dict[str, Any]:
+        # A guest sees no history at all.
+        if device.get("role") == "guest":
+            return {"events": []}
         return {"events": state.store.events(since=since, door=door, person=person, limit=limit)}
 
     @api.get("/state")
     async def door_states(device: dict = Depends(require_device)) -> dict[str, Any]:
         doors = [await state.door_state(d) for d in cfg.doors]
+        role = device.get("role", "user")
         presence: dict[str, str] = {}
-        for d in cfg.doors:
-            ev = state.store.last_event(d.id)
-            if ev and ev.get("person"):
-                presence[ev["person"]] = "home" if ev["action"] == "unlock" else "away"
+        if role == "guest":
+            # Only their doors, and never who is home.
+            allowed = _device_doors(device) or []
+            doors = [d for d in doors if d["id"] in allowed]
+        else:
+            for d in cfg.doors:
+                ev = state.store.last_event(d.id)
+                if ev and ev.get("person"):
+                    presence[ev["person"]] = "home" if ev["action"] == "unlock" else "away"
         return {
             "doors": doors,
             "presence": presence,
             # The caller's role, so the app can show only what it may.
-            "role": device.get("role", "user"),
+            "role": role,
+            "device_id": device["id"],
+            "expires": device.get("expires"),
             "relay": {"online": True, "apns": state.apns.live},
         }
 
@@ -542,11 +592,44 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                     "name": d["name"],
                     "person": d["person"],
                     "role": d["role"],
+                    "doors": json.loads(d["doors"]) if d["doors"] else None,
+                    "expires": d["expires"],
                     "created": d["created"],
                 }
                 for d in state.store.devices()
             ]
         }
+
+    @api.post("/invites")
+    async def create_invite(payload: dict[str, Any],
+                            _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Create a guest invitation: a name, some doors, and a window."""
+        name = str(payload.get("name") or "Gäst").strip() or "Gäst"
+        doors = [str(d) for d in (payload.get("doors") or [])
+                 if cfg.door(str(d)) is not None]
+        if not doors:
+            raise HTTPException(400, "choose at least one door")
+        minutes = int(payload.get("expires_in_minutes") or 240)
+        minutes = max(5, min(minutes, 60 * 24 * 30))
+        expires = time.time() + minutes * 60
+        code = secrets.token_hex(3).upper()
+        state.store.add_invite(code, name, doors, expires)
+        _LOGGER.info("Guest invite for %s: %s (doors=%s, %d min)", name, code, doors, minutes)
+        return {"code": code, "expires_at": expires, "doors": doors}
+
+    @api.delete("/devices/{device_id}")
+    async def revoke_device(device_id: str,
+                            device: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Revoke a device (a guest that has left, an old phone)."""
+        target = state.store.device(device_id)
+        if target is None:
+            raise HTTPException(404, "unknown device")
+        if target["id"] == device["id"]:
+            raise HTTPException(409, "you cannot remove your own device")
+        if target["role"] == "owner" and state.store.owner_count() <= 1:
+            raise HTTPException(409, "the last owner cannot be removed")
+        state.store.remove_device(device_id)
+        return {"ok": True}
 
     @api.post("/devices/{device_id}/role")
     async def set_device_role(device_id: str, payload: dict[str, Any],
@@ -566,15 +649,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @api.post("/action")
     async def action(payload: dict[str, Any],
                      device: dict = Depends(require_device)) -> dict[str, Any]:
-        return await state.do_action(
-            str(payload.get("door")), str(payload.get("action")), device
-        )
+        door_id = str(payload.get("door"))
+        if device.get("role") == "guest":
+            allowed = _device_doors(device) or []
+            if door_id not in allowed:
+                raise HTTPException(403, "not your door")
+        return await state.do_action(door_id, str(payload.get("action")), device)
 
     # -- live activities (Lock Screen / Dynamic Island) ---------------------
     @api.post("/live/start-token")
     async def live_start_token(payload: dict[str, Any],
                                device: dict = Depends(require_device)) -> dict[str, Any]:
         """The device's push-to-start token (lets the relay start an activity)."""
+        if device.get("role") == "guest":
+            return {"ok": True}  # guests receive no pushes; ignore the token
         state.store.set_live_start_token(device["id"], str(payload.get("apns_token") or ""))
         return {"ok": True}
 
@@ -582,6 +670,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def live_activity(payload: dict[str, Any],
                             device: dict = Depends(require_device)) -> dict[str, Any]:
         """The per-activity update token the app reports once an activity exists."""
+        if device.get("role") == "guest":
+            return {"ok": True}
         door_id = str(payload.get("door") or "")
         if cfg.door(door_id) is None:
             raise HTTPException(400, "unknown door")

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import time
+
 from fastapi.testclient import TestClient
 
+from app.config import Door
 from app.main import create_app
 
 
@@ -145,3 +148,98 @@ def test_a_person_registers_even_without_a_push_token(cfg):
         device = hmk.store.device("dev1")
         assert device["person"] == "claes"
         assert not device["apns_token"]
+
+
+# -- guests: a role, a window and chosen doors -------------------------------
+
+def two_door_cfg(cfg):
+    cfg.doors.append(Door(id="back", name="Källardörren", lock_entity="lock.back"))
+    return cfg
+
+
+def test_a_guest_invitation_restricts_the_device(cfg):
+    app = create_app(two_door_cfg(cfg))
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+
+        invite = client.post("/api/invites", headers=owner, json={
+            "name": "Städning", "doors": ["front"], "expires_in_minutes": 120,
+        }).json()
+        assert invite["doors"] == ["front"]
+
+        guest = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": invite["code"], "name": "Städ"}).json()["device_token"]}
+        row = hmk.store.device(guest["Authorization"].removeprefix("Bearer "))
+        assert row["role"] == "guest"
+        assert row["doors"] == '["front"]'
+        assert row["expires"] > time.time()
+
+        # No history, no presence, and only their door.
+        assert client.get("/api/events", headers=guest).json() == {"events": []}
+        state = client.get("/api/state", headers=guest).json()
+        assert [d["id"] for d in state["doors"]] == ["front"]
+        assert state["presence"] == {}
+        assert state["role"] == "guest"
+
+        # They may act on their door, never on another.
+        assert client.post("/api/action", headers=guest,
+                           json={"door": "front", "action": "unlock"}).status_code == 200
+        assert client.post("/api/action", headers=guest,
+                           json={"door": "back", "action": "unlock"}).status_code == 403
+
+        # The invitation is single use.
+        assert client.post("/api/pair", json={"code": invite["code"], "name": "igen"}).status_code == 401
+
+
+def test_an_invitation_needs_a_door_and_an_owner(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+        user = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "User"}).json()["device_token"]}
+
+        assert client.post("/api/invites", headers=user,
+                           json={"name": "x", "doors": ["front"]}).status_code == 403
+        assert client.post("/api/invites", headers=owner,
+                           json={"name": "x", "doors": []}).status_code == 400
+
+
+def test_an_expired_guest_is_refused(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+        invite = client.post("/api/invites", headers=owner, json={
+            "name": "Gäst", "doors": ["front"], "expires_in_minutes": 5,
+        }).json()
+        token = client.post("/api/pair",
+                            json={"code": invite["code"], "name": "G"}).json()["device_token"]
+
+        hmk.store._db.execute("UPDATE devices SET expires = ? WHERE id = ?",
+                              (time.time() - 1, token))
+        hmk.store._db.commit()
+
+        assert client.get("/api/state",
+                          headers={"Authorization": f"Bearer {token}"}).status_code == 403
+
+
+def test_the_owner_can_revoke_a_device(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner_token = client.post("/api/pair",
+                                  json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]
+        user_token = client.post("/api/pair",
+                                 json={"code": hmk.pair_code, "name": "User"}).json()["device_token"]
+        owner = {"Authorization": f"Bearer {owner_token}"}
+        user = {"Authorization": f"Bearer {user_token}"}
+
+        assert client.delete(f"/api/devices/{user_token}", headers=owner).json() == {"ok": True}
+        assert client.get("/api/state", headers=user).status_code == 401
+        # An owner cannot remove their own device, nor the last owner.
+        assert client.delete(f"/api/devices/{owner_token}", headers=owner).status_code == 409

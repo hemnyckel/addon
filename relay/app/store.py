@@ -39,8 +39,18 @@ class Store:
                 apns_env TEXT NOT NULL DEFAULT 'production',
                 live_start_token TEXT,
                 role TEXT NOT NULL DEFAULT 'user',
+                doors TEXT,
+                expires REAL,
                 prefs TEXT NOT NULL DEFAULT '{}',
                 created REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS invites (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                doors TEXT,
+                expires REAL NOT NULL,
+                created REAL NOT NULL,
+                used_by TEXT
             );
             CREATE TABLE IF NOT EXISTS live_activities (
                 device TEXT NOT NULL,
@@ -73,6 +83,10 @@ class Store:
             self._db.execute("ALTER TABLE devices ADD COLUMN live_start_token TEXT")
         if "role" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
+        if "doors" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN doors TEXT")
+        if "expires" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN expires REAL")
         self._db.commit()
 
     # -- devices ------------------------------------------------------------
@@ -85,6 +99,31 @@ class Store:
 
     def set_role(self, device_id: str, role: str) -> None:
         self._db.execute("UPDATE devices SET role = ? WHERE id = ?", (role, device_id))
+        self._db.commit()
+
+    def add_guest(self, device_id: str, name: str, doors: list[str],
+                  expires: float) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO devices (id, name, role, doors, expires, created) "
+            "VALUES (?, ?, 'guest', ?, ?, ?)",
+            (device_id, name, json.dumps(doors), expires, time.time()),
+        )
+        self._db.commit()
+
+    # -- invitations (a guest is created by the owner in advance) ------------
+    def add_invite(self, code: str, name: str, doors: list[str], expires: float) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO invites (code, name, doors, expires, created) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (code, name, json.dumps(doors), expires, time.time()),
+        )
+        self._db.commit()
+
+    def invite(self, code: str) -> sqlite3.Row | None:
+        return self._db.execute("SELECT * FROM invites WHERE code = ?", (code,)).fetchone()
+
+    def use_invite(self, code: str, device_id: str) -> None:
+        self._db.execute("UPDATE invites SET used_by = ? WHERE code = ?", (device_id, code))
         self._db.commit()
 
     def owner_count(self) -> int:

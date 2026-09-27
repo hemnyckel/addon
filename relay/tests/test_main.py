@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 from app.apns import PushResult
 from app.main import State
@@ -396,6 +397,17 @@ def test_an_auto_relock_never_notifies(cfg):
     auto = {**UNLOCK, "action": "lock", "source": "auto", "method": "Automatiskt", "person": None}
 
     asyncio.run(state.notify(auto))
+
+    assert state.apns.sent == []
+
+
+def test_a_guest_is_never_notified(cfg):
+    state = make_state(cfg)
+    # Even with a push token, a guest is not notified.
+    state.store.add_guest("g1", "Städning", ["front"], time.time() + 3600)
+    state.store.set_apns("g1", DEVICE_TOKEN, None, {}, "production")
+
+    asyncio.run(state.notify(UNLOCK))
 
     assert state.apns.sent == []
 
