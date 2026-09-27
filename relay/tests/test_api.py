@@ -273,6 +273,57 @@ def test_a_guest_time_window_is_enforced(cfg):
         assert refused.json()["detail"] == "outside the guest's hours"
 
 
+def test_a_nameless_family_invitation_is_fine(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+
+        invite = client.post("/api/invites", headers=owner, json={
+            "role": "user", "expires_at": time.time() + 3600,
+        }).json()
+
+        token = client.post("/api/pair",
+                            json={"code": invite["code"], "name": "Elsas iPhone"}).json()["device_token"]
+        row = hmk.store.device(token)
+        assert row["role"] == "user"
+        assert row["name"] == "Elsas iPhone"   # the phone names itself
+        assert not row["person"]               # she sets her own name later
+
+
+def test_the_device_identifies_itself_without_wiping_a_person(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+        invite = client.post("/api/invites", headers=owner, json={
+            "name": "Elsa", "role": "user", "expires_at": time.time() + 3600,
+        }).json()
+        token = client.post("/api/pair",
+                            json={"code": invite["code"], "name": "x"}).json()["device_token"]
+        auth = {"Authorization": f"Bearer {token}"}
+
+        # An empty person on register must not wipe the one the invitation set…
+        client.post("/api/register", headers=auth, json={
+            "apns_token": "", "person": "",
+            "device": {"model": "iPhone", "os": "iOS 26.0"},
+        })
+        row = hmk.store.device(token)
+        assert row["person"] == "Elsa"
+        # …and the model was stored (nobody typed it).
+        assert row["device_model"] == "iPhone"
+        assert row["device_os"] == "iOS 26.0"
+
+        mine = next(d for d in client.get("/api/devices", headers=owner).json()["devices"]
+                    if d["id"] == token)
+        assert mine["device_model"] == "iPhone"
+
+        # The relay lists everyone it knows, for the app's pickers.
+        assert "Elsa" in client.get("/api/state", headers=auth).json()["people"]
+
+
 def test_a_guest_invitation_restricts_the_device(cfg):
     app = create_app(two_door_cfg(cfg))
     with TestClient(app) as client:

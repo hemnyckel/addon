@@ -44,6 +44,8 @@ class Store:
                 from_time TEXT,
                 to_time TEXT,
                 expires REAL,
+                device_model TEXT,
+                device_os TEXT,
                 prefs TEXT NOT NULL DEFAULT '{}',
                 created REAL NOT NULL
             );
@@ -109,6 +111,10 @@ class Store:
             self._db.execute("ALTER TABLE devices ADD COLUMN from_time TEXT")
         if "to_time" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN to_time TEXT")
+        if "device_model" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN device_model TEXT")
+        if "device_os" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN device_os TEXT")
         invite_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(invites)")}
         for column, ddl in (
             ("role", "ALTER TABLE invites ADD COLUMN role TEXT NOT NULL DEFAULT 'guest'"),
@@ -128,23 +134,55 @@ class Store:
         )
         self._db.commit()
 
+    def set_device_info(self, device_id: str, model: str | None, os: str | None) -> None:
+        """What the phone says it is (it identifies itself; nobody types it)."""
+        if not model and not os:
+            return
+        self._db.execute(
+            "UPDATE devices SET device_model = COALESCE(?, device_model), "
+            "device_os = COALESCE(?, device_os) WHERE id = ?",
+            (model or None, os or None, device_id),
+        )
+        self._db.commit()
+
+    def persons(self) -> list[str]:
+        """Everyone the relay knows about: device people and event people."""
+        names = {
+            str(row["person"])
+            for row in self._db.execute(
+                "SELECT DISTINCT person FROM devices WHERE person IS NOT NULL AND person != ''"
+            )
+        }
+        names |= {
+            str(row["person"])
+            for row in self._db.execute(
+                "SELECT DISTINCT person FROM events WHERE person IS NOT NULL AND person != ''"
+            )
+        }
+        return sorted(names)
+
     def set_role(self, device_id: str, role: str) -> None:
         self._db.execute("UPDATE devices SET role = ? WHERE id = ?", (role, device_id))
         self._db.commit()
 
     def add_guest(self, device_id: str, name: str, doors: list[str],
                   expires: float) -> None:
-        self.add_invited(device_id, name, "guest", doors, [], None, None, expires)
+        self.add_invited(device_id, name, "guest", doors, [], None, None, expires,
+                         person=name)
 
     def add_invited(self, device_id: str, name: str, role: str, doors: list[str],
                     days: list[int], from_time: str | None, to_time: str | None,
-                    expires: float | None) -> None:
-        """A device created from an owner's invitation (a family member or guest)."""
+                    expires: float | None, person: str | None = None) -> None:
+        """A device created from an owner's invitation (a family member or guest).
+
+        The person may be unknown: a family member sets their own name once their
+        phone is paired.
+        """
         self._db.execute(
             "INSERT OR REPLACE INTO devices "
             "(id, name, person, role, doors, days, from_time, to_time, expires, created) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (device_id, name, name, role, json.dumps(doors), json.dumps(days),
+            (device_id, name, person, role, json.dumps(doors), json.dumps(days),
              from_time, to_time, expires, time.time()),
         )
         self._db.commit()
@@ -187,8 +225,11 @@ class Store:
 
     def set_apns(self, device_id: str, apns_token: str, person: str | None,
                  prefs: dict[str, Any], env: str = "production") -> None:
+        # An empty person never wipes a known one (an invitation may have named
+        # this person already).
         self._db.execute(
-            "UPDATE devices SET apns_token = ?, person = ?, prefs = ?, apns_env = ? WHERE id = ?",
+            "UPDATE devices SET apns_token = ?, "
+            "person = COALESCE(NULLIF(?, ''), person), prefs = ?, apns_env = ? WHERE id = ?",
             (apns_token, person, json.dumps(prefs), env, device_id),
         )
         self._db.commit()

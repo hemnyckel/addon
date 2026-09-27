@@ -586,9 +586,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if invite is not None and not invite["used_by"] and time.time() <= invite["expires"]:
             device_id = uuid.uuid4().hex
             role = str(invite["role"] or "guest")
+            invited_name = str(invite["name"] or "").strip()
             state.store.add_invited(
                 device_id,
-                invite["name"],
+                # A nameless family invitation still knows which phone it is.
+                invited_name or str(payload.get("name") or "Enhet"),
                 role,
                 [str(d) for d in _json_list(invite["doors"])],
                 [int(d) for d in _json_list(invite["days"]) if str(d).isdigit()],
@@ -596,9 +598,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 invite["to_time"],
                 # A family member is permanent; the code's expiry is not theirs.
                 None if role == "user" else float(invite["expires"]),
+                person=invited_name or None,
             )
             state.store.use_invite(code, device_id)
-            _LOGGER.info("%s '%s' paired", role, invite["name"])
+            _LOGGER.info("%s '%s' paired", role, invited_name or payload.get("name"))
             return {"device_token": device_id, "relay_id": "hemnyckel"}
 
         if code != state.pair_code or time.time() > state.pair_expires:
@@ -620,6 +623,13 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             payload.get("person"),
             payload.get("prefs") or {},
             normalize_env(payload.get("apns_env") or cfg.apns_env),
+        )
+        # The phone identifies itself; nobody types its model.
+        info = payload.get("device") or {}
+        state.store.set_device_info(
+            device["id"],
+            str(info.get("model") or "") or None,
+            str(info.get("os") or "") or None,
         )
         return {"ok": True}
 
@@ -657,6 +667,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             # The caller's role, so the app can show only what it may.
             "role": role,
             "device_id": device["id"],
+            "person": device.get("person"),
+            # Everyone the relay knows, so the app's people pickers stay in sync.
+            "people": [] if role == "guest" else state.store.persons(),
             "expires": device.get("expires"),
             "schedule": schedule,
             "home": json.loads(home) if home else None,
@@ -715,6 +728,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                     "days": _json_list(d["days"]) or None,
                     "from_time": d["from_time"],
                     "to_time": d["to_time"],
+                    "device_model": d["device_model"],
+                    "device_os": d["device_os"],
                     "expires": d["expires"],
                     "created": d["created"],
                 }
@@ -727,11 +742,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                             _: dict = Depends(require_owner)) -> dict[str, Any]:
         """Invite a family member (permanent) or a guest (doors, days, times)."""
         name = str(payload.get("name") or "").strip()
-        if not name:
-            raise HTTPException(400, "a name is required")
         role = str(payload.get("role") or "guest").lower()
         if role not in ("user", "guest"):
             raise HTTPException(400, "role must be user or guest")
+        # A family member sets their own name on their device; a guest needs one.
+        if role == "guest" and not name:
+            raise HTTPException(400, "a name is required")
 
         doors: list[str] = []
         days: list[int] = []
