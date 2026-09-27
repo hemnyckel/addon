@@ -726,6 +726,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         role = str(payload.get("role") or "").lower()
         if role not in _ROLES:
             raise HTTPException(400, f"role must be one of {sorted(_ROLES)}")
+        if not state.store.person_exists(person):
+            raise HTTPException(404, "unknown person")
         if role != "owner" and state.store.owner_devices() - state.store.owner_devices(person) < 1:
             raise HTTPException(409, "the last owner cannot be demoted")
         state.store.set_role_for_person(person, role)

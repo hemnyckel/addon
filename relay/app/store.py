@@ -178,6 +178,12 @@ class Store:
         self._db.execute("UPDATE devices SET role = ? WHERE person = ?", (role, person))
         self._db.commit()
 
+    def person_exists(self, person: str) -> bool:
+        row = self._db.execute(
+            "SELECT 1 FROM devices WHERE person = ? LIMIT 1", (person,)
+        ).fetchone()
+        return row is not None
+
     def owner_devices(self, person: str | None = None) -> int:
         if person is None:
             row = self._db.execute(
