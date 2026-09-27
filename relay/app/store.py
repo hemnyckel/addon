@@ -156,20 +156,18 @@ class Store:
         self._db.commit()
 
     def persons(self) -> list[str]:
-        """Everyone the relay knows about: device people and event people."""
-        names = {
+        """The people the relay knows, i.e. those who have a device.
+
+        Deliberately devices-only: the app's pickers must match the Personer
+        screen exactly, or they drift.
+        """
+        return [
             str(row["person"])
             for row in self._db.execute(
-                "SELECT DISTINCT person FROM devices WHERE person IS NOT NULL AND person != ''"
+                "SELECT DISTINCT person FROM devices "
+                "WHERE person IS NOT NULL AND person != '' ORDER BY person"
             )
-        }
-        names |= {
-            str(row["person"])
-            for row in self._db.execute(
-                "SELECT DISTINCT person FROM events WHERE person IS NOT NULL AND person != ''"
-            )
-        }
-        return sorted(names)
+        ]
 
     def set_role(self, device_id: str, role: str) -> None:
         self._db.execute("UPDATE devices SET role = ? WHERE id = ?", (role, device_id))
@@ -217,6 +215,8 @@ class Store:
             group["devices"].append({
                 "id": row["id"],
                 "name": row["name"],
+                "person": row["person"],
+                "role": row["role"],
                 "device_model": row["device_model"],
                 "device_os": row["device_os"],
                 "created": row["created"],
