@@ -807,6 +807,33 @@ def test_editing_doors_adds_and_revokes_codes(cfg):
         assert hmk.store.guest_slots("Stad") == {"back": 7}
 
 
+def test_a_code_that_cannot_be_cleared_stays_known(cfg):
+    """An unreachable lock must not make the relay forget a live code."""
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front"),
+                                   ("back", "Källardörren", "ent-back")),
+        ok=False,
+    )
+    app = guest_client(cfg, fake, two_doors=True)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite, _token = paired_guest(client, hmk, owner, doors=["front", "back"])
+        # With every call failing, the invite wrote no code; seed the registry
+        # with what the person holds so the removal path is exercised.
+        hmk.store.set_guest_slots("Stad", {"front": 6, "back": 7})
+
+        body = client.post("/api/people/Stad/guest", headers=owner, json={
+            "name": "Stad", "doors": ["front"],
+            "expires_at": invite["expires_at"],
+        }).json()
+
+        assert body["changed"] == ["doors"]
+        assert "back" in body["failed"]
+        # The code on `back` is still on the lock, so the relay still knows it.
+        assert hmk.store.guest_slots("Stad") == {"front": 6, "back": 7}
+
+
 def test_editing_a_guest_name_moves_the_person_and_the_slot(cfg):
     fake = FakeHa(
         states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),

@@ -998,8 +998,11 @@ class State:
                 continue  # a door that is no longer configured
             slot = existing.get(door_id)
             if door_id not in desired:
-                if slot is not None:
-                    await self.revoke_lock_guest(door_id, slot)
+                # A code we cannot clear stays on the lock; keep knowing about it
+                # so a later revocation (or expiry) can try again, and say so.
+                if slot is not None and not await self.revoke_lock_guest(door_id, slot):
+                    new_slots[door_id] = slot
+                    failed.append(door_id)
                 continue
             if slot is None:
                 created = await self.create_lock_guest(
@@ -1018,7 +1021,12 @@ class State:
                                                      from_time, to_time)):
                 new_slots[door_id] = slot
                 continue
-            await self.revoke_lock_guest(door_id, slot)
+            # The code has to change but the old one must go first: if it will
+            # not clear, keep it and say so rather than leaving two codes.
+            if not await self.revoke_lock_guest(door_id, slot):
+                new_slots[door_id] = slot
+                failed.append(door_id)
+                continue
             created = await self.create_lock_guest(
                 door_id, name, days, from_time, to_time, expires
             )
