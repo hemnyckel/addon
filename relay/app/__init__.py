@@ -5,4 +5,4 @@ add-on manifest (``relay/config.yaml``), because Home Assistant reads the
 manifest while ``/health`` reports this. A test enforces the pair.
 """
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"

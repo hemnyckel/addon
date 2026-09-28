@@ -190,7 +190,9 @@ GET /slots?door=front
       "slots": [
         { "slot": 4, "door": "front", "name": "", "occupied": true,
           "has_pin": false, "has_fingerprint": true, "has_rfid": false,
-          "finger_used": false, "credentials": ["fingerprint"] }
+          "finger_used": false, "finger_state": "claimed",
+          "fingers": [ { "label": "left index", "enrolled": "2026-09-28T10:00:00+00:00" } ],
+          "credentials": ["fingerprint"] }
       ]
     }
   -> 400 unknown door
@@ -202,12 +204,23 @@ POST /slots/6/code        { "door": "front", "name": "Elise", "code": "4821", "u
   -> 200 { "ok": true, "slot": 6, "name": "Elise", "until": null, "code": "4821" }
   -> 400 a name is required
 
-POST /slots/6/finger      { "door": "front" }
-  -> 200 { "ok": true, "slot": 6 }        # the reader lights; touch it at the door
+POST /slots/6/finger      { "door": "front", "finger": "left index" }
+  -> 200 { "ok": true, "slot": 6, "finger": "left index" }
+                          # the reader lights; touch it at the door. `finger` is
+                          # the owner's label for the finger being enrolled - a
+                          # claim, never something the lock reports back.
+
+DELETE /slots/6/finger?door=front
+  -> 200 { "ok": true, "slot": 6 }   # clears that slot's fingerprint template
 
 DELETE /slots/6?door=front
   -> 200 { "ok": true, "slot": 6 }
 ```
+
+`fingers` and `finger_state` are passed through from Home Assistant's slots
+sensor unchanged: the integration owns the labels and the policy, and the relay
+only carries them. A slot with a fingerprint but no label has an empty `fingers`
+list; `finger_state` is `none`, `claimed` or `confirmed`.
 
 `code` and `until` are optional on a code call; when no `code` is given the lock
 generates one and it is returned **exactly once** in this response. A code is

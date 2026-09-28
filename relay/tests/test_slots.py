@@ -20,7 +20,9 @@ SLOT_STATES = [
                 {"slot": 6, "name": "Elise", "has_pin": True,
                  "has_fingerprint": False, "has_rfid": False, "credentials": ["pin"]},
                 {"slot": 4, "name": "", "has_pin": False,
-                 "has_fingerprint": True, "has_rfid": False, "credentials": ["fingerprint"]},
+                 "has_fingerprint": True, "has_rfid": False, "credentials": ["fingerprint"],
+                 "finger_used": False, "finger_state": "claimed",
+                 "fingers": [{"label": "left index", "enrolled": "2026-09-28T10:00:00+00:00"}]},
             ],
         },
     },
@@ -98,6 +100,15 @@ def test_the_slot_list_resolves_a_door_from_its_slots_sensor(cfg):
         # A slot with a credential but no name is still occupied.
         assert body["slots"][0]["occupied"] is True
         assert body["slots"][0]["has_fingerprint"] is True
+        # The finger labels and their state travel through from the slot table.
+        assert body["slots"][0]["fingers"] == [
+            {"label": "left index", "enrolled": "2026-09-28T10:00:00+00:00"}
+        ]
+        assert body["slots"][0]["finger_state"] == "claimed"
+        assert body["slots"][0]["finger_used"] is False
+        # A slot without a label is empty here, not invented.
+        assert body["slots"][1]["fingers"] == []
+        assert body["slots"][1]["finger_state"] == ""
 
 
 def test_a_door_with_no_slots_sensor_is_simply_empty(cfg):
@@ -203,9 +214,41 @@ def test_a_finger_enrolment_lights_the_reader(cfg):
         owner = pair_owner(client, app.state.hmk)
 
         assert client.post("/api/slots/6/finger", headers=owner,
-                           json={"door": "front"}).json() == {"ok": True, "slot": 6}
+                           json={"door": "front"}).json() == {
+                               "ok": True, "slot": 6, "finger": None}
         assert fake.calls[-1] == ("hemnyckel", "enroll_fingerprint",
                                   {"slot": 6, "entry_id": "ent-front"})
+
+
+def test_a_finger_enrolment_carries_the_owners_label(cfg):
+    fake = FakeHa(SLOT_STATES)
+    fake.response = {"ent-front": {"slot": 6, "name": "Elise", "via": "local"}}
+    app = make_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+
+        body = client.post("/api/slots/6/finger", headers=owner,
+                           json={"door": "front", "finger": "left index"}).json()
+
+        assert body == {"ok": True, "slot": 6, "finger": "left index"}
+        assert fake.calls[-1] == (
+            "hemnyckel", "enroll_fingerprint",
+            {"slot": 6, "entry_id": "ent-front", "finger": "left index"},
+        )
+
+
+def test_a_fingerprint_can_be_cleared_for_one_slot(cfg):
+    fake = FakeHa(SLOT_STATES)
+    app = make_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+
+        assert client.delete("/api/slots/4/finger?door=front", headers=owner).json() == {
+            "ok": True, "slot": 4}
+        assert fake.calls[-1] == (
+            "hemnyckel", "clear_fingerprint",
+            {"slot": 4, "entry_id": "ent-front"},
+        )
 
 
 def test_only_an_owner_may_manage_codes(cfg):
@@ -223,6 +266,8 @@ def test_only_an_owner_may_manage_codes(cfg):
                            json={"door": "front", "name": "Elise"}).status_code == 403
         assert client.post("/api/slots/6/finger", headers=user,
                            json={"door": "front"}).status_code == 403
+        assert client.delete("/api/slots/6/finger?door=front",
+                             headers=user).status_code == 403
         assert client.delete("/api/slots/6?door=front", headers=user).status_code == 403
         # Nothing ever reached Home Assistant.
         assert fake.calls == []

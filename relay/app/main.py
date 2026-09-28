@@ -304,6 +304,7 @@ def _slot_rows(attrs: dict[str, Any], door_id: str) -> list[dict[str, Any]]:
         credentials = raw.get("credentials")
         if not isinstance(credentials, list):
             credentials = [kind for kind, key in _CREDENTIAL_KINDS if marks[key]]
+        fingers = raw.get("fingers")
         rows.append({
             "slot": number,
             "door": door_id,
@@ -311,6 +312,14 @@ def _slot_rows(attrs: dict[str, Any], door_id: str) -> list[dict[str, Any]]:
             "occupied": bool(name) or bool(credentials),
             **marks,
             "finger_used": bool(raw.get("finger_used")),
+            # The finger labels travel through unchanged: the integration owns
+            # them, and the relay only carries them to the app. ``finger_state``
+            # is the integration's own display state (none/claimed/confirmed).
+            "finger_state": str(raw.get("finger_state") or ""),
+            "fingers": [
+                dict(item) for item in (fingers if isinstance(fingers, list) else [])
+                if isinstance(item, dict)
+            ],
             "credentials": [str(kind) for kind in credentials],
         })
     rows.sort(key=lambda row: row["slot"])
@@ -1234,11 +1243,31 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @api.post("/slots/{slot}/finger")
     async def enroll_finger(slot: int, payload: dict[str, Any],
                             _: dict = Depends(require_owner)) -> dict[str, Any]:
-        """Light the lock's reader so the person can touch it at the door."""
+        """Light the lock's reader so the person can touch it at the door.
+
+        ``finger`` is the owner's label for the finger being enrolled (one of
+        the fixed vocabulary, or a free word). The integration stores it as a
+        claim; the lock reports nothing while enrolling.
+        """
         entry_id = await state.slot_entry_id(str(payload.get("door") or ""))
+        finger = str(payload.get("finger") or "").strip()
+        data: dict[str, Any] = {"slot": slot, "entry_id": entry_id}
+        if finger:
+            data["finger"] = finger
         ok, _response = await state.ha.call_service_result(
-            "hemnyckel", "enroll_fingerprint",
-            {"slot": slot, "entry_id": entry_id},
+            "hemnyckel", "enroll_fingerprint", data,
+        )
+        if not ok:
+            raise HTTPException(502, _UPSTREAM_ERROR)
+        return {"ok": True, "slot": slot, "finger": finger or None}
+
+    @api.delete("/slots/{slot}/finger")
+    async def clear_finger(slot: int, door: str,
+                           _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Clear the fingerprint template in one slot, and forget its label."""
+        entry_id = await state.slot_entry_id(door)
+        ok = await state.ha.call_service(
+            "hemnyckel", "clear_fingerprint", {"slot": slot, "entry_id": entry_id}
         )
         if not ok:
             raise HTTPException(502, _UPSTREAM_ERROR)
