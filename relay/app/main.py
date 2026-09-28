@@ -336,6 +336,16 @@ def _service_row(response: Any, entry_id: str) -> dict[str, Any] | None:
     return next((value for value in response.values() if isinstance(value, dict)), None)
 
 
+def _guest_rows(response: Any, entry_id: str) -> list[dict[str, Any]]:
+    """One entry's guest rows out of a ``list_guests`` service response."""
+    if not isinstance(response, dict):
+        return []
+    rows = response.get(entry_id)
+    if not isinstance(rows, list):
+        rows = next((value for value in response.values() if isinstance(value, list)), None)
+    return [row for row in (rows or []) if isinstance(row, dict)]
+
+
 def _refusal_reason(response: Any) -> str:
     """Home Assistant's own words for a refusal, when it gave any.
 
@@ -828,20 +838,36 @@ class State:
         return {"slot": int(slot), "code": code, "until": (row or {}).get("until")}
 
     async def revoke_invite_codes(self, device_id: str) -> None:
-        """Remove the lock codes an invitation created, best-effort.
+        """Remove the lock codes a guest holds, best-effort.
 
         Called when a guest device is revoked and when an expired guest is
-        refused. The stored slots are cleared after the attempt, so a refusal
-        revokes once and is not retried on every request; a door that is
-        unreachable never fails the revocation.
+        refused. A guest is a *person*: once they have been edited, their codes
+        live in the person-level registry rather than one invitation, so a
+        person with another device still in place keeps the shared codes and the
+        registry is only cleared when their last device goes. Before any edit,
+        the invitation's own slots are used exactly as before. The stored slots
+        are cleared after the attempt, so a refusal revokes once and is not
+        retried; a door that is unreachable never fails the revocation.
         """
+        device = self.store.device(device_id)
+        person = str(device["person"]) if device is not None and device["person"] else None
         invite = self.store.invite_for_device(device_id)
-        if invite is None:
-            return
-        slots = _json_map(invite["slots"])
-        if not slots:
-            return
-        self.store.clear_invite_slots(str(invite["code"]))
+        registry = self.store.guest_slots(person) if person else {}
+        if registry:
+            if invite is not None:
+                self.store.clear_invite_slots(str(invite["code"]))
+            if person and self.store.other_device_count(person, device_id) > 0:
+                return  # another of this person's devices still uses the codes
+            if person:
+                self.store.set_guest_slots(person, {})
+            slots = registry
+        else:
+            if invite is None:
+                return
+            slots = _json_map(invite["slots"])
+            if not slots:
+                return
+            self.store.clear_invite_slots(str(invite["code"]))
         for door_id, slot in slots.items():
             try:
                 entry_id = await self.slot_entry_id(door_id)
@@ -854,6 +880,187 @@ class State:
             )
             if not ok:
                 _LOGGER.warning("revoke: door %s slot %s not reached", door_id, slot)
+
+    # -- editing a guest: the person, and the codes on every lock -------------
+    async def guest_kind(self, door_id: str, slot: int) -> str | None:
+        """The integration's kind for a guest slot, read live, or None.
+
+        ``list_guests`` is the integration's own view of what the lock holds
+        ("recurring" or "simple"); using it instead of a remembered copy means
+        an edit does what is true now. None (an unreachable lock, an older
+        integration) is treated as "cannot be changed in place".
+        """
+        try:
+            entry_id = await self.slot_entry_id(door_id)
+        except HTTPException:
+            return None
+        ok, response = await self.ha.call_service_result(
+            "hemnyckel", "list_guests", {"entry_id": entry_id}
+        )
+        if not ok:
+            return None
+        for row in _guest_rows(response, entry_id):
+            try:
+                if int(row.get("slot", -1)) == int(slot):
+                    return str(row.get("kind") or "") or None
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    async def update_lock_guest(self, door_id: str, slot: int, name: str,
+                                days: list[int], from_time: str | None,
+                                to_time: str | None) -> bool:
+        """Change a recurring guest's name and window in place - the code lives."""
+        try:
+            entry_id = await self.slot_entry_id(door_id)
+        except HTTPException:
+            return False
+        data: dict[str, Any] = {"slot": int(slot), "name": name, "entry_id": entry_id}
+        if days:
+            data["schedule"] = [_schedule_window(days, from_time, to_time)]
+        ok, _response = await self.ha.call_service_result("hemnyckel", "update_guest", data)
+        if not ok:
+            _LOGGER.warning("edit: %s could not be updated on door %s", name, door_id)
+        return ok
+
+    async def revoke_lock_guest(self, door_id: str, slot: int) -> bool:
+        """Clear one guest code on one door, best-effort."""
+        try:
+            entry_id = await self.slot_entry_id(door_id)
+        except HTTPException:
+            _LOGGER.warning("edit: no slot table for door %s", door_id)
+            return False
+        ok = await self.ha.call_service(
+            "hemnyckel", "revoke_guest_code",
+            {"slot": int(slot), "entry_id": entry_id},
+        )
+        if not ok:
+            _LOGGER.warning("edit: door %s slot %s not reached", door_id, slot)
+        return ok
+
+    def _code_row(self, door_id: str, created: dict[str, Any]) -> dict[str, Any]:
+        door = self.cfg.door(door_id)
+        return {
+            "door": door_id,
+            "door_name": door.name if door is not None else door_id,
+            "slot": int(created["slot"]),
+            "code": str(created["code"]),
+            "until": created.get("until"),
+        }
+
+    async def edit_guest_life(self, person: str, *, name: str, doors: list[str],
+                              days: list[int], from_time: str | None,
+                              to_time: str | None, expires: float) -> dict[str, Any]:
+        """A guest's whole life, moved as one: the relay's rows and every lock.
+
+        The person is the unit - the same way ``set_role_for_person`` moves a
+        role - so every device row gets the new doors, weekdays, window and end
+        date, and the codes are reconciled per door. A recurring guest whose end
+        date did not change is updated in place, so the code the guest already
+        knows keeps working; anything else (a door added or removed, a simple
+        guest turned recurring or back, an end date that moved) is revoked and
+        recreated, because the integration cannot change that in place. A fresh
+        code is returned once, exactly like an invitation's.
+        """
+        group = next((g for g in self.store.people() if g.get("name") == person), None)
+        if group is None:
+            raise HTTPException(404, "unknown person")
+        old_doors = sorted(str(d) for d in (group.get("doors") or []))
+        old_days = sorted(int(d) for d in (group.get("days") or []))
+        old_from = group.get("from_time")
+        old_to = group.get("to_time")
+        old_expires = group.get("expires")
+
+        # Every code this person holds: the invitations that created them, and
+        # the person-level registry an earlier edit wrote.
+        existing: dict[str, int] = {}
+        for device in self.store.devices():
+            if str(device["person"] or "") != person:
+                continue
+            invite = self.store.invite_for_device(device["id"])
+            if invite is not None:
+                existing.update(_json_map(invite["slots"]))
+        existing.update(self.store.guest_slots(person))
+
+        schedule_changed = days != old_days or (
+            bool(days) and (from_time, to_time) != (old_from, old_to)
+        )
+        until_changed = (
+            old_expires is None or abs(float(expires) - float(old_expires)) > 0.5
+        )
+        desired = set(doors)
+
+        new_slots: dict[str, int] = {}
+        codes: list[dict[str, Any]] = []
+        failed: list[str] = []
+        for door_id in dict.fromkeys([*existing, *doors]):
+            if self.cfg.door(door_id) is None:
+                continue  # a door that is no longer configured
+            slot = existing.get(door_id)
+            if door_id not in desired:
+                if slot is not None:
+                    await self.revoke_lock_guest(door_id, slot)
+                continue
+            if slot is None:
+                created = await self.create_lock_guest(
+                    door_id, name, days, from_time, to_time, expires
+                )
+                if created is None:
+                    failed.append(door_id)
+                    continue
+                new_slots[door_id] = int(created["slot"])
+                codes.append(self._code_row(door_id, created))
+                continue
+            target_kind = "recurring" if days else "simple"
+            kind = await self.guest_kind(door_id, slot)
+            if (not until_changed and kind == target_kind
+                    and await self.update_lock_guest(door_id, slot, name, days,
+                                                     from_time, to_time)):
+                new_slots[door_id] = slot
+                continue
+            await self.revoke_lock_guest(door_id, slot)
+            created = await self.create_lock_guest(
+                door_id, name, days, from_time, to_time, expires
+            )
+            if created is None:
+                failed.append(door_id)
+                continue
+            new_slots[door_id] = int(created["slot"])
+            codes.append(self._code_row(door_id, created))
+
+        changed: list[str] = []
+        if name != person:
+            changed.append("name")
+        if doors != old_doors:
+            changed.append("doors")
+        if days != old_days:
+            changed.append("days")
+        elif schedule_changed:
+            changed.append("window")
+        if until_changed:
+            changed.append("expires")
+
+        self.store.set_guest_fields_for_person(
+            person, doors, days, from_time, to_time, expires
+        )
+        self.store.set_guest_slots(person, new_slots)
+        if name != person:
+            self.store.rename_person(person, name)
+            self.store.rename_guest_slots(person, name)
+            self.mqtt.refresh(person)  # withdraw the old slug
+        self.mqtt.refresh(name)
+        return {
+            "ok": True,
+            "person": name,
+            "doors": doors,
+            "days": days,
+            "from_time": from_time,
+            "to_time": to_time,
+            "expires_at": expires,
+            "guest_codes": codes,
+            "failed": failed,
+            "changed": changed,
+        }
 
 
 def create_app(cfg: Config | None = None) -> FastAPI:
@@ -1071,6 +1278,49 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         state.store.set_role_for_person(person, role)
         state.mqtt.refresh(person)
         return {"ok": True}
+
+    @api.post("/people/{person}/guest")
+    async def edit_person_guest(person: str, payload: dict[str, Any],
+                                _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Edit a guest's life: name, doors, weekdays, window and end date.
+
+        Owner only. A person is the unit and the lock codes follow, so the
+        guest the app edits and the code on the lock stay the same person. A
+        code that can be changed in place is; otherwise it is revoked and
+        recreated with the new window and returned once.
+        """
+        group = next((g for g in state.store.people() if g.get("name") == person), None)
+        if group is None:
+            raise HTTPException(404, "unknown person")
+        if group.get("role") != "guest":
+            raise HTTPException(409, "only a guest has a guest life to edit")
+        name = str(payload.get("name") or "").strip() or person
+        if name != person and state.store.person_exists(name):
+            raise HTTPException(409, "a person with that name already exists")
+        doors = sorted({str(d) for d in (payload.get("doors") or [])
+                        if cfg.door(str(d)) is not None})
+        if not doors:
+            raise HTTPException(400, "choose at least one door")
+        days = sorted({int(d) for d in (payload.get("days") or [])
+                       if str(d).isdigit() and 1 <= int(d) <= 7})
+        from_time = str(payload.get("from_time") or "") or None
+        to_time = str(payload.get("to_time") or "") or None
+        if bool(from_time) != bool(to_time):
+            raise HTTPException(400, "give both a start and an end time, or neither")
+        if (from_time and _parse_hhmm(from_time) is None) or \
+                (to_time and _parse_hhmm(to_time) is None):
+            raise HTTPException(400, "times must be HH:MM")
+        try:
+            expires = float(payload["expires_at"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "expires_at is required") from None
+        now = time.time()
+        if not now < expires <= now + 366 * 86400:
+            raise HTTPException(400, "expires_at must be within the next year")
+        return await state.edit_guest_life(
+            person, name=name, doors=doors, days=days,
+            from_time=from_time, to_time=to_time, expires=expires,
+        )
 
     @api.get("/devices")
     async def list_devices(_: dict = Depends(require_owner)) -> dict[str, Any]:

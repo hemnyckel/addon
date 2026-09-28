@@ -192,3 +192,49 @@ def test_presence_merges_lock_events_and_geofence_reports(tmp_path):
     store._db.execute("UPDATE presence SET updated = ? WHERE person = 'Pappa'", (now - 300,))
     store.add_event(event(3, id="c", person="Pappa", action="unlock", ts=now - 10))
     assert store.presence()["Pappa"] == {"state": "home", "source": "lock", "at": now - 10}
+
+
+def test_guest_slots_round_trip_and_rename(tmp_path):
+    store = Store(str(tmp_path))
+
+    store.set_guest_slots("Städ", {"front": 6, "back": 7})
+    assert store.guest_slots("Städ") == {"front": 6, "back": 7}
+    assert store.guest_slots("Someone else") == {}
+
+    # A person is their name: the registry follows a rename.
+    store.rename_guest_slots("Städ", "Städhjälpen")
+    assert store.guest_slots("Städ") == {}
+    assert store.guest_slots("Städhjälpen") == {"front": 6, "back": 7}
+
+    store.set_guest_slots("Städhjälpen", {})
+    assert store.guest_slots("Städhjälpen") == {}
+
+
+def test_guest_slots_survive_a_malformed_setting(tmp_path):
+    store = Store(str(tmp_path))
+    store.set_setting("guest_slots", "not json")
+    assert store.guest_slots("Städ") == {}
+
+
+def test_rename_person_moves_devices_presence_and_invites(tmp_path):
+    store = Store(str(tmp_path))
+    store.add_invited("d1", "Städ", "guest", ["front"], [], None, None, None,
+                      person="Städ")
+    store.add_invite("CODE1", "Städ", "guest", ["front"], [], None, None, time.time() + 60)
+    store.set_presence("Städ", "away")
+
+    store.rename_person("Städ", "Städhjälpen")
+
+    assert store.device("d1")["person"] == "Städhjälpen"
+    assert store.presence()["Städhjälpen"]["state"] == "away"
+    assert store.invite("CODE1")["name"] == "Städhjälpen"
+
+
+def test_other_device_count_sees_the_persons_other_phones(tmp_path):
+    store = Store(str(tmp_path))
+    store.add_invited("a", "Städ", "guest", ["front"], [], None, None, None, person="Städ")
+    store.add_invited("b", "Städ", "guest", ["front"], [], None, None, None, person="Städ")
+
+    assert store.other_device_count("Städ", "a") == 1
+    assert store.other_device_count("Städ", "b") == 1
+    assert store.other_device_count("Städ", "ghost") == 2

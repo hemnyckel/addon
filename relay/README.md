@@ -147,11 +147,21 @@ itself, all built from MQTT discovery. Home Assistant supplies the broker — th
 add-on asks for it with `services: mqtt:want` — so nobody types an address or a
 password; if Home Assistant provides nothing the bridge stays off.
 
+The select offers only **`owner` and `user`**. A guest is not a bridge role: a
+role alone says nothing about doors, hours or an end date, and the relay reads
+an empty door list as *all doors*, an empty window as *any time* and no expiry as
+*never* — a guest without a life. Guests are made and edited in the app, and a
+`guest` command is refused with a logged reason and the truth republished, so the
+control snaps back.
+
 A role change over MQTT is applied through the *same* store call as one made in
 the app, and the same rule holds: the last owner can never be demoted. After
 every attempt the relay republishes the person's state, so the Home Assistant
 control always shows the truth. The app stays the place for invitations, guests'
 doors and history — the bridge carries roles and health, and nothing else.
+
+A person who became a guest in Home Assistant *before* this rule keeps that role;
+their state carries `guest_configured: false` so the unset life is visible.
 
 See [`docs/mqtt-bridge.md`](../docs/mqtt-bridge.md) for the topics, the payloads
 and the rules.

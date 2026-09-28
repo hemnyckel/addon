@@ -174,6 +174,47 @@ A guest device:
 - is **never notified** and registers no push tokens;
 - is refused entirely once `expires` has passed (403).
 
+### Editing a guest
+
+A guest is edited, not just created. The person is the unit — every one of their
+device rows moves together, the same way a role does — and the lock codes follow,
+so the guest the app shows and the code on the lock stay the same person.
+
+```
+POST /people/<person>/guest          # owner only
+  { "name": "Städning", "doors": ["front", "back"],
+    "days": [1, 3], "from_time": "08:00", "to_time": "17:00",
+    "expires_at": 1758... }
+  -> 200 { "ok": true, "person": "Städning", "doors": ["back", "front"],
+           "days": [1, 3], "from_time": "08:00", "to_time": "17:00",
+           "expires_at": 1758...,
+           "guest_codes": [ { "door": "back", "door_name": "Källardörren",
+                              "slot": 7, "code": "222222", "until": null } ],
+           "failed": [], "changed": ["doors", "days"] }
+  -> 400 a door is required, or the times/end date are unusable
+  -> 404 unknown person
+  -> 409 that person is not a guest, or the new name is already taken
+```
+
+`days` is optional: no weekdays means a simple guest that lives until
+`expires_at`; weekdays mean a recurring guest whose code is written inside each
+weekly window. At least one door is required, and a start time and an end time
+come as a pair.
+
+The lock codes are reconciled per door. A recurring guest whose end date did not
+change is **updated in place**, so the code the guest already knows keeps
+working; a door added or removed, a simple guest turned recurring (or back), or a
+moved end date cannot be changed in place, so the code is **revoked and
+recreated** with the new window. Any new code appears in `guest_codes` **once** —
+the relay never stores or logs it, only the slot. `failed` lists the doors whose
+lock could not be reached (their old code is not left behind silently), and
+`changed` names the fields that really moved (`name`, `doors`, `days`, `window`,
+`expires`).
+
+`role` is not part of this call: a guest is a role, and the role endpoints
+(`POST /people/<person>/role`, `POST /devices/<id>/role`) already accept only
+`owner` and `user`.
+
 ## Slots & codes (owner only)
 
 The lock's slots are where attribution comes from: a **named slot** is what turns

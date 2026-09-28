@@ -53,8 +53,14 @@ _PUBLISHED_PEOPLE_KEY = "mqtt_people"
 # coming up is the other trigger, and that one is immediate.
 _STATE_REFRESH_INTERVAL = 60.0
 
-# The only payloads a role command may carry.
-ROLES = ("owner", "user", "guest")
+# The roles the bridge carries. A guest is deliberately *not* one of them: a
+# role alone says nothing about doors, hours or an end date, and the relay reads
+# an empty door list as "all doors", an empty window as "any time" and no expiry
+# as "never expires" - a guest without a life. Guests are made and shaped in the
+# app (doors, weekdays, window, end date) and edited there, so the Home Assistant
+# select offers only the two permanent roles and the command handler refuses
+# ``guest`` with a reason, republishing the truth so the control snaps back.
+ROLES = ("owner", "user")
 
 # One device for the whole bridge, so the family's device list stays honest:
 # the locks are the integration's devices, the relay is this one.
@@ -87,6 +93,24 @@ def _guest_expired(group: dict[str, Any], now: float) -> bool:
     expires = group.get("expires")
     return bool(
         group.get("role") == "guest" and expires is not None and now > float(expires)
+    )
+
+
+def guest_life_configured(group: dict[str, Any]) -> bool:
+    """Whether a guest actually has a life: doors, hours and an end date.
+
+    A person whose role is ``guest`` but who carries none of these is not a
+    guest in any meaningful sense - the relay reads it as every door, any time,
+    for ever. That can only come from a role set before the bridge stopped
+    accepting ``guest``, so the projection says so explicitly (below) instead of
+    quietly presenting it as fine.
+    """
+    return bool(
+        group.get("doors")
+        or group.get("days")
+        or group.get("from_time")
+        or group.get("to_time")
+        or group.get("expires") is not None
     )
 
 
@@ -125,6 +149,10 @@ def state_document(group: dict[str, Any], *, last_seen: float | None = None,
             "to": group.get("to_time"),
         }
         document["expires"] = group.get("expires")
+        # A guest whose life was never set (a role set from Home Assistant
+        # before guests stopped being a bridge role) is visible and actionable
+        # rather than silently "all doors, any time, for ever".
+        document["guest_configured"] = guest_life_configured(group)
     return document
 
 
@@ -556,9 +584,6 @@ class MqttBridge:
             return
         s = match.group(1)
         role = (payload or "").strip().lower()
-        if role not in ROLES:
-            _LOGGER.warning("MQTT: ignoring role %r on %s", payload, topic)
-            return
         group = next(
             (g for g in self._people() if slug(str(g["name"])) == s),
             None,
@@ -567,6 +592,19 @@ class MqttBridge:
             _LOGGER.warning("MQTT: unknown person slug %r", s)
             return
         person = str(group["name"])
+        if role == "guest":
+            # A guest is not a bridge role: the app is where a guest is made
+            # and shaped (doors, hours, end date). Republish the truth so the
+            # control snaps back and the refusal is visible.
+            _LOGGER.warning(
+                "MQTT: refusing 'guest' for %s: guests are created and edited in the app",
+                person,
+            )
+            self.publish_person(group)
+            return
+        if role not in ROLES:
+            _LOGGER.warning("MQTT: ignoring role %r on %s", payload, topic)
+            return
         if role != "owner" and self._store.owner_devices() - self._store.owner_devices(person) < 1:
             _LOGGER.warning("MQTT: refusing to demote the last owner (%s)", person)
             self.publish_person(group)

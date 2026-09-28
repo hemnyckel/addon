@@ -483,11 +483,14 @@ class FakeHa:
     """A stand-in for HaClient: canned states and recorded service calls."""
 
     def __init__(self, states: list[dict] | None = None, response=None,
-                 ok: bool = True) -> None:
+                 ok: bool = True, responses: dict | None = None) -> None:
         self._states = list(states or [])
         self.calls: list[tuple[str, str, dict]] = []
         self.ok = ok
         self.response = response
+        # Per-service canned responses, for the calls that read a result back
+        # (list_guests returns a list, not the create services' dict).
+        self.responses = dict(responses or {})
         self.connected = False
 
     async def run(self) -> None:  # pragma: no cover - parity with HaClient
@@ -505,6 +508,8 @@ class FakeHa:
 
     async def call_service_result(self, domain: str, service: str, data: dict):
         self.calls.append((domain, service, data))
+        if service in self.responses:
+            return self.ok, self.responses[service]
         return self.ok, self.response
 
 
@@ -688,3 +693,203 @@ def test_an_expired_guest_revokes_its_code_once(cfg):
         fake.calls.clear()
         assert client.get("/api/state", headers=auth).status_code == 403
         assert [c for c in fake.calls if c[1] == "revoke_guest_code"] == []
+
+
+# -- editing a guest: the person, and the codes on every lock ----------------
+
+def edit_body(name="Stad", **overrides):
+    body = {"name": name, "doors": ["front"], "expires_at": time.time() + 7 * 86400}
+    body.update(overrides)
+    return body
+
+
+def paired_guest(client, hmk, owner, invite_name="Stad", **invite_overrides):
+    """Invite, pair and return (invite, token) for a guest called ``invite_name``."""
+    invite = guest_invite(client, owner, name=invite_name, **invite_overrides)
+    token = client.post("/api/pair",
+                        json={"code": invite["code"], "name": invite_name}).json()["device_token"]
+    return invite, token
+
+
+def test_editing_a_recurring_guest_updates_the_schedule_in_place(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front"),
+                                   ("back", "Källardörren", "ent-back")),
+        response={"ent-front": {"slot": 6, "code": "111111", "name": "Stad"},
+                  "ent-back": {"slot": 7, "code": "222222", "name": "Stad"}},
+        responses={"list_guests": {
+            "ent-front": [{"slot": 6, "kind": "recurring"}],
+            "ent-back": [{"slot": 7, "kind": "recurring"}],
+        }},
+    )
+    app = guest_client(cfg, fake, two_doors=True)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite, _token = paired_guest(
+            client, hmk, owner, doors=["front", "back"],
+            days=[1, 3], from_time="08:00", to_time="17:00",
+        )
+
+        fake.calls.clear()
+        body = client.post("/api/people/Stad/guest", headers=owner, json={
+            "name": "Stad", "doors": ["front", "back"],
+            "days": [2], "from_time": "09:00", "to_time": "10:00",
+            "expires_at": invite["expires_at"],
+        }).json()
+
+        assert body["changed"] == ["days"]
+        assert body["guest_codes"] == []            # the code survived
+        assert [c[1] for c in fake.calls] == ["list_guests", "update_guest",
+                                              "list_guests", "update_guest"]
+        assert fake.calls[1][2]["schedule"] == [
+            {"days": ["tue"], "start": "09:00", "end": "10:00"}
+        ]
+        assert hmk.store.guest_slots("Stad") == {"front": 6, "back": 7}
+
+
+def test_turning_a_simple_guest_recurring_recreates_the_code(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 5, "code": "123456", "name": "Stad"}},
+        responses={"list_guests": {"ent-front": [{"slot": 5, "kind": "simple"}]}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite, _token = paired_guest(client, hmk, owner)
+
+        fake.calls.clear()
+        body = client.post("/api/people/Stad/guest", headers=owner, json={
+            "name": "Stad", "doors": ["front"], "days": [1],
+            "from_time": "08:00", "to_time": "17:00",
+            "expires_at": invite["expires_at"],
+        }).json()
+
+        assert body["changed"] == ["days"]
+        assert [c[1] for c in fake.calls] == [
+            "list_guests", "revoke_guest_code", "create_recurring_guest",
+        ]
+        assert body["guest_codes"] == [{
+            "door": "front", "door_name": "Ytterdörren", "slot": 5,
+            "code": "123456", "until": None,
+        }]
+        assert hmk.store.guest_slots("Stad") == {"front": 5}
+
+
+def test_editing_doors_adds_and_revokes_codes(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front"),
+                                   ("back", "Källardörren", "ent-back")),
+        response={"ent-front": {"slot": 6, "code": "111111", "name": "Stad"},
+                  "ent-back": {"slot": 7, "code": "222222", "name": "Stad"}},
+        responses={"list_guests": {
+            "ent-front": [{"slot": 6, "kind": "simple"}],
+            "ent-back": [{"slot": 7, "kind": "simple"}],
+        }},
+    )
+    app = guest_client(cfg, fake, two_doors=True)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite, _token = paired_guest(client, hmk, owner, doors=["front"])
+
+        fake.calls.clear()
+        body = client.post("/api/people/Stad/guest", headers=owner, json={
+            "name": "Stad", "doors": ["back"],
+            "expires_at": invite["expires_at"],
+        }).json()
+
+        assert body["changed"] == ["doors"]
+        assert [c[1] for c in fake.calls] == ["revoke_guest_code", "create_guest_code"]
+        assert body["guest_codes"][0]["door"] == "back"
+        assert hmk.store.guest_slots("Stad") == {"back": 7}
+
+
+def test_editing_a_guest_name_moves_the_person_and_the_slot(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 5, "code": "123456", "name": "Stad"}},
+        responses={"list_guests": {"ent-front": [{"slot": 5, "kind": "simple"}]}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite, _token = paired_guest(client, hmk, owner)
+
+        fake.calls.clear()
+        body = client.post("/api/people/Stad/guest", headers=owner, json={
+            "name": "Städhjälpen", "doors": ["front"],
+            "expires_at": invite["expires_at"],
+        }).json()
+
+        assert body["person"] == "Städhjälpen"
+        assert body["changed"] == ["name"]
+        assert hmk.store.person_exists("Städhjälpen")
+        assert not hmk.store.person_exists("Stad")
+        assert hmk.store.invite(invite["code"])["name"] == "Städhjälpen"
+        updates = [c for c in fake.calls if c[1] == "update_guest"]
+        assert updates and updates[0][2]["name"] == "Städhjälpen"
+
+
+def test_editing_a_legacy_ha_guest_gives_them_a_life(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 5, "code": "123456", "name": "Isabelle"}},
+        responses={"list_guests": {"ent-front": []}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        # A role set from Home Assistant before guests stopped being a bridge
+        # role: no doors, no window, no end date - and no invitation either.
+        hmk.store.add_invited("legacy", "Isabelle", "guest", [], [], None, None, None,
+                              person="Isabelle")
+
+        body = client.post("/api/people/Isabelle/guest", headers=owner, json={
+            "name": "Isabelle", "doors": ["front"], "days": [1, 2, 3, 4, 5],
+            "from_time": "07:00", "to_time": "08:00",
+            "expires_at": time.time() + 7 * 86400,
+        }).json()
+
+        assert body["changed"] == ["doors", "days", "expires"]
+        assert [c[1] for c in fake.calls] == ["create_recurring_guest"]
+        assert hmk.store.guest_slots("Isabelle") == {"front": 5}
+        # The role itself is never touched by an edit.
+        assert hmk.store.device("legacy")["role"] == "guest"
+
+
+def test_editing_a_guest_is_guarded_and_validated(cfg):
+    fake = FakeHa(states=guest_sensor_states(("front", "Ytterdörren", "ent-front")))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        client.post("/api/register", headers=owner, json={"apns_token": "", "person": "Owner"})
+        user = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "User"}).json()["device_token"]}
+        client.post("/api/register", headers=user, json={"apns_token": "", "person": "Bo"})
+
+        body = edit_body("Bo")
+        assert client.post("/api/people/Bo/guest", headers=user, json=body).status_code == 403
+        assert client.post("/api/people/Nobody/guest", headers=owner, json=body).status_code == 404
+        # Only a guest has a guest life.
+        assert client.post("/api/people/Bo/guest", headers=owner, json=body).status_code == 409
+        assert client.post("/api/people/Owner/guest", headers=owner, json=body).status_code == 409
+
+        _invite, _token = paired_guest(client, hmk, owner)
+        # A door is required, times come as a pair, and the end date must be ahead.
+        assert client.post("/api/people/Stad/guest", headers=owner,
+                           json=edit_body("Stad", doors=[])).status_code == 400
+        assert client.post("/api/people/Stad/guest", headers=owner, json=edit_body(
+            "Stad", from_time="08:00")).status_code == 400
+        assert client.post("/api/people/Stad/guest", headers=owner, json=edit_body(
+            "Stad", expires_at=time.time() - 10)).status_code == 400
+        assert client.post("/api/people/Stad/guest", headers=owner, json=edit_body(
+            "Stad", expires_at=time.time() + 400 * 86400)).status_code == 400
+        # A rename onto another person's name is refused, not merged.
+        assert client.post("/api/people/Stad/guest", headers=owner,
+                           json=edit_body("Bo")).status_code == 409

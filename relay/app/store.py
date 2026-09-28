@@ -29,6 +29,34 @@ def _json_list(raw: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def _json_map(raw: Any) -> dict[str, int]:
+    """A JSON object of door -> slot, or an empty map when malformed."""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, int] = {}
+    for key, slot in value.items():
+        try:
+            result[str(key)] = int(slot)
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+# The person-level map of the lock slots a guest's codes live in, keyed by
+# person name. It exists because a guest is a *person* - their codes may have
+# been created by several invitations, or edited after the fact - and the
+# invitation is a per-device artifact that may not even exist (a role set from
+# Home Assistant before guests stopped being a bridge role). It is a registry,
+# not history.
+_GUEST_SLOTS_KEY = "guest_slots"
+
+
 class Store:
     def __init__(self, data_dir: str) -> None:
         os.makedirs(data_dir, exist_ok=True)
@@ -262,6 +290,79 @@ class Store:
             groups.values(),
             key=lambda group: (not group["name"], group["name"] or group["devices"][0]["name"]),
         )
+
+    # -- guest life: the person's own code slots -----------------------------
+    def _all_guest_slots(self) -> dict[str, dict[str, int]]:
+        result: dict[str, dict[str, int]] = {}
+        for person, raw in self._guest_slots_raw().items():
+            slots = _json_map(raw)
+            if slots:
+                result[str(person)] = slots
+        return result
+
+    def _guest_slots_raw(self) -> dict[str, Any]:
+        raw = self.setting(_GUEST_SLOTS_KEY)
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _save_guest_slots(self, slots: dict[str, dict[str, int]]) -> None:
+        self.set_setting(_GUEST_SLOTS_KEY, json.dumps(slots))
+
+    def guest_slots(self, person: str) -> dict[str, int]:
+        """The lock slots this person's guest codes live in, by door."""
+        return dict(self._all_guest_slots().get(person, {}))
+
+    def set_guest_slots(self, person: str, slots: dict[str, int]) -> None:
+        if not person:
+            return
+        all_slots = self._all_guest_slots()
+        clean = {str(door): int(slot) for door, slot in slots.items() if str(door)}
+        if clean:
+            all_slots[person] = clean
+        else:
+            all_slots.pop(person, None)
+        self._save_guest_slots(all_slots)
+
+    def rename_guest_slots(self, old: str, new: str) -> None:
+        if not old or not new or old == new:
+            return
+        all_slots = self._all_guest_slots()
+        moved = all_slots.pop(old, None)
+        if moved:
+            all_slots[new] = moved
+            self._save_guest_slots(all_slots)
+
+    def set_guest_fields_for_person(
+        self, person: str, doors: list[str], days: list[int],
+        from_time: str | None, to_time: str | None, expires: float | None,
+    ) -> None:
+        """Move a whole guest life at once - every one of the person's devices."""
+        self._db.execute(
+            "UPDATE devices SET doors = ?, days = ?, from_time = ?, to_time = ?, "
+            "expires = ? WHERE person = ?",
+            (json.dumps(doors), json.dumps(days), from_time, to_time, expires, person),
+        )
+        self._db.commit()
+
+    def rename_person(self, old: str, new: str) -> None:
+        """A person is their name: every row that carried it carries the new one."""
+        self._db.execute("UPDATE devices SET person = ? WHERE person = ?", (new, old))
+        self._db.execute("UPDATE presence SET person = ? WHERE person = ?", (new, old))
+        self._db.execute("UPDATE invites SET name = ? WHERE name = ?", (new, old))
+        self._db.commit()
+
+    def other_device_count(self, person: str, device_id: str) -> int:
+        """How many of this person's devices are not ``device_id``."""
+        row = self._db.execute(
+            "SELECT COUNT(*) AS c FROM devices WHERE person = ? AND id != ?",
+            (person, device_id),
+        ).fetchone()
+        return int(row["c"])
 
     def add_guest(self, device_id: str, name: str, doors: list[str],
                   expires: float) -> None:

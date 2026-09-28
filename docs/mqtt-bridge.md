@@ -1,8 +1,10 @@
 # The MQTT bridge: the family's people in Home Assistant
 
 The app is where the family manages who is who. Home Assistant owns the *locks*. This bridge
-lets Home Assistant **see** the people and **change their role**, without moving the truth
-anywhere: the relay's database stays authoritative and the relay keeps enforcing.
+lets Home Assistant **see** the people and **change their role** — between `owner` and `user`,
+the two permanent roles — without moving the truth anywhere: the relay's database stays
+authoritative and the relay keeps enforcing. A guest is deliberately not one of the roles the
+bridge can set; see [Why guests are not a bridge role](#why-guests-are-not-a-bridge-role).
 
 ## Why MQTT and not something else
 
@@ -36,7 +38,7 @@ sees the current truth immediately after a restart instead of waiting for the ne
 | relay → HA | `hemnyckel/relay/state` | `{"status":"ok","ha":true,"apns":false,"doors":2,"version":"0.2.2"}` — the same facts as `/health`, retained |
 | relay → HA | `hemnyckel/relay/availability` | `online` / `offline` (also the client's last will, so a dead relay says so) |
 | relay → HA | `hemnyckel/people/<slug>/state` | the person, see below |
-| HA → relay | `hemnyckel/people/<slug>/role/set` | `owner`, `user` or `guest` — nothing else |
+| HA → relay | `hemnyckel/people/<slug>/role/set` | `owner` or `user` — nothing else |
 
 The relay's own state document is republished when the Home Assistant connection comes up —
 the broker connects first, so the initial document says `"ha": false` — and again on a one-minute
@@ -64,6 +66,11 @@ A person's state document:
 ```
 
 `doors`, `window` and `expires` only mean something for a guest; they are omitted otherwise.
+A guest also carries `guest_configured`: `true` when the guest really has a life (doors, hours
+or an end date), and `false` when the role is `guest` but none of them is set. A false value
+means the relay is reading that person as *all doors, any time, for ever* — a role set from
+Home Assistant before guests stopped being a bridge role — and it is visible so the owner can
+give the guest a life in the app. An edit in the app clears it.
 
 ## Entities in Home Assistant
 
@@ -72,7 +79,7 @@ the locks are the integration's devices, the relay is this one.
 
 | Entity | Kind | What it is |
 |---|---|---|
-| `select.hemnyckel_<slug>` | `select`, options `owner`/`user`/`guest` | the person's role. Its attributes carry the devices, the guest window and the expiry, so one row tells the whole story |
+| `select.hemnyckel_<slug>` | `select`, options `owner`/`user` | the person's role. Its attributes carry the devices, the guest window and the expiry, so one row tells the whole story |
 | `sensor.hemnyckel_relaet` | `sensor` | the relay: state `ok`, attributes `ha`, `apns`, `doors`, `version` |
 | `binary_sensor.hemnyckel_apns` | `binary_sensor`, device class `connectivity` | whether push is configured — the thing you want to glance at the day the Apple key lands |
 
@@ -82,7 +89,7 @@ Discovery payloads (relay → `homeassistant/<component>/hemnyckel/<object>/conf
 {"name": "Elise Högberg", "unique_id": "hemnyckel_person_elise-hogberg",
  "state_topic": "hemnyckel/people/elise-hogberg/state",
  "command_topic": "hemnyckel/people/elise-hogberg/role/set",
- "value_template": "{{ value_json.role }}", "options": ["owner", "user", "guest"],
+ "value_template": "{{ value_json.role }}", "options": ["owner", "user"],
  "json_attributes_topic": "hemnyckel/people/elise-hogberg/state",
  "availability_topic": "hemnyckel/relay/availability",
  "icon": "mdi:account-key",
@@ -96,7 +103,8 @@ creating a second entity — and an entity the family has customised keeps its c
 
 ## The rules the relay applies to a command
 
-1. The payload must be exactly `owner`, `user` or `guest`; anything else is ignored and logged.
+1. The payload must be exactly `owner` or `user`; anything else is ignored and logged. A
+   `guest` is refused with a logged reason and the truth is republished — see below.
 2. An unknown slug is ignored and logged — never a new person.
 3. **The last owner cannot be demoted.** If the command would leave the install without an
    owner, it is refused; this is the same rule the app's management endpoints already enforce.
@@ -106,6 +114,23 @@ creating a second entity — and an entity the family has customised keeps its c
    Home Assistant control always shows the truth.
 6. A person's state is republished when their devices change (a new pairing, a revocation, a
    rename, a new `last_seen`).
+
+## Why guests are not a bridge role
+
+A role alone carries no *life*. The relay's rules read an empty door list as **all doors**, an
+empty window as **any time**, and no expiry as **never expires** — so a person whose role is set
+to `guest` from Home Assistant is not a guest: it is a user without notifications, with every
+door, for ever. That is the opposite of what "guest" means.
+
+A guest is shaped, not labelled: **doors, weekdays, a window and an end date**, and each of them
+writes a matching code on the chosen locks. That shaping — and editing it afterwards — is the
+app's job (`Personer → a guest → Redigera`, backed by the relay's owner-only
+`POST /people/{person}/guest`). The bridge therefore offers only the two permanent roles and
+refuses `guest` outright.
+
+Someone who became a guest from Home Assistant *before* this rule keeps that role — the bridge
+never silently rewrites it. Their state carries `guest_configured: false`, so the unset life is
+visible in Home Assistant and can be given a real life with one edit in the app.
 
 ## How the relay finds the broker
 

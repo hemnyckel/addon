@@ -115,6 +115,38 @@ def test_an_expired_guest_is_not_active():
     assert state_document(group, now=2.0)["active"] is False
 
 
+def test_a_guest_without_a_life_is_flagged_as_unconfigured():
+    """A role set from Home Assistant before guests stopped being a bridge role."""
+    group = {
+        "name": "Isabelle", "role": "guest", "doors": [], "days": [],
+        "from_time": None, "to_time": None, "expires": None, "devices": [],
+    }
+
+    document = state_document(group, now=1_000_000_000.0)
+
+    assert document["guest_configured"] is False
+
+
+def test_a_guest_with_a_life_is_flagged_as_configured():
+    group = {
+        "name": "Städning", "role": "guest", "doors": ["front"], "days": [1],
+        "from_time": "08:00", "to_time": "12:00", "expires": 2_000_000_000.0,
+        "devices": [],
+    }
+
+    assert state_document(group, now=1_000_000_000.0)["guest_configured"] is True
+
+
+def test_a_non_guest_carries_no_guest_flags():
+    group = {"name": "Claes", "role": "owner", "doors": [], "days": [],
+             "from_time": None, "to_time": None, "expires": None, "devices": []}
+
+    document = state_document(group)
+
+    assert "guest_configured" not in document
+    assert "doors" not in document
+
+
 def test_person_discovery_matches_the_design():
     topic, payload = person_discovery("Elise Högberg")
 
@@ -124,7 +156,9 @@ def test_person_discovery_matches_the_design():
     assert payload["state_topic"] == "hemnyckel/people/elise-hogberg/state"
     assert payload["command_topic"] == "hemnyckel/people/elise-hogberg/role/set"
     assert payload["value_template"] == "{{ value_json.role }}"
-    assert payload["options"] == ["owner", "user", "guest"]
+    # A guest is not a bridge role: it carries no doors, hours or end date, and
+    # the app is where a guest is made and shaped.
+    assert payload["options"] == ["owner", "user"]
     assert payload["json_attributes_topic"] == "hemnyckel/people/elise-hogberg/state"
     assert payload["availability_topic"] == AVAILABILITY_TOPIC
     assert payload["icon"] == "mdi:account-key"
@@ -298,6 +332,38 @@ def test_the_last_owner_cannot_be_demoted_and_the_truth_is_republished(cfg, tmp_
     # The control snaps back: the refusal republishes what is still true.
     assert [topic for topic, _, _ in published] == ["hemnyckel/people/claes/state"]
     assert state_payloads(published)[0]["role"] == "owner"
+
+
+def test_the_bridge_refuses_to_make_someone_a_guest(cfg, tmp_path):
+    published: list = []
+    bridge, store = make_bridge(cfg, tmp_path, published)
+    add_person(store, "owner-dev", "Claes", role="owner")
+    add_person(store, "elise-dev", "Elise Högberg")
+    published.clear()
+
+    asyncio.run(bridge.command("hemnyckel/people/elise-hogberg/role/set", "guest"))
+
+    # The role is untouched and the truth is republished: HA's control snaps back.
+    assert store.device("elise-dev")["role"] == "user"
+    assert [topic for topic, _, _ in published] == ["hemnyckel/people/elise-hogberg/state"]
+    assert state_payloads(published)[0]["role"] == "user"
+
+
+def test_the_refusal_leaves_a_legacy_guest_alone(cfg, tmp_path):
+    """An HA-set guest must not be silently changed; their unset life is shown."""
+    published: list = []
+    bridge, store = make_bridge(cfg, tmp_path, published)
+    add_person(store, "owner-dev", "Claes", role="owner")
+    store.add_invited("legacy", "Isabelle", "guest", [], [], None, None, None,
+                      person="Isabelle")
+    published.clear()
+
+    asyncio.run(bridge.command("hemnyckel/people/isabelle/role/set", "guest"))
+
+    assert store.device("legacy")["role"] == "guest"
+    payload = state_payloads(published)[0]
+    assert payload["role"] == "guest"
+    assert payload["guest_configured"] is False
 
 
 def test_an_owner_may_step_down_when_another_owner_remains(cfg, tmp_path):
