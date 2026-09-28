@@ -1,5 +1,5 @@
 name: "Hemnyckel"
-version: "0.2.2"
+version: "0.3.0"
 slug: "hemnyckel"
 description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
 url: "https://github.com/hemnyckel/addon"
@@ -13,6 +13,11 @@ init: false
 # Talk to Home Assistant through the supervisor, which injects the token: the
 # add-on needs no Home Assistant credentials at all.
 homeassistant_api: true
+# The MQTT bridge: the supervisor injects the broker's host and credentials
+# (MQTT_HOST / MQTT_USERNAME / MQTT_PASSWORD) when Home Assistant has MQTT set
+# up. Without it the bridge stays off - it never falls back to anonymous.
+services:
+  - mqtt:want
 # The app talks to the relay on the home network (and through the reverse proxy
 # when away).
 ports:

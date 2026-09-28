@@ -244,7 +244,8 @@ GET /api/health  -> the same
 ```
 
 The root path stays open for probes; `apns` is true only when a real key is
-loaded.
+loaded. The same facts are also published, retained, for Home Assistant's MQTT
+bridge (see [`mqtt-bridge.md`](mqtt-bridge.md)).
 
 ## Event object
 

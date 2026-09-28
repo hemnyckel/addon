@@ -459,6 +459,18 @@ class Store:
         ).fetchone()
         return None if row is None else _row(row)
 
+    def last_seen(self, person: str) -> float | None:
+        """When this person was last behind an attributed lock event.
+
+        The relay keeps no per-device clock, so this is the person's own last
+        activity; the bridge shows it on each of their devices. None means the
+        relay has never attributed anything to them.
+        """
+        row = self._db.execute(
+            "SELECT MAX(ts) AS ts FROM events WHERE person = ?", (person,)
+        ).fetchone()
+        return None if row is None or row["ts"] is None else float(row["ts"])
+
     def presence(self) -> dict[str, dict[str, Any]]:
         """Each person's last known state, with where that knowledge comes from.
 

@@ -29,6 +29,7 @@ from .apns import ApnsClient
 from .config import Config, Door, load_config, normalize_env
 from .events import from_ha
 from .ha import HaClient
+from .mqtt import MqttBridge
 from .store import Store
 
 _LOGGER = logging.getLogger("hemnyckel")
@@ -333,6 +334,9 @@ class State:
         self.store.ensure_owner()
         self.apns = ApnsClient(cfg)
         self.ha = HaClient(cfg, self.on_ha_event)
+        # The MQTT bridge is a projection of what this store holds, published to
+        # Home Assistant; it stays off unless the supervisor injected a broker.
+        self.mqtt = MqttBridge(cfg, self.store, version=__version__, facts=self.health)
         self.pair_code = ""
         self.pair_expires = 0.0
         self.new_pair_code()
@@ -347,6 +351,16 @@ class State:
         self._last_unlock: dict[str, float] = {}
         # Pairing attempts per client, to bound brute force.
         self._pair_attempts: dict[str, list[float]] = {}
+
+    def health(self) -> dict[str, Any]:
+        """The relay's facts, shared by ``/health`` and the MQTT bridge."""
+        return {
+            "status": "ok",
+            "ha": self.ha.connected,
+            "apns": self.apns.live,
+            "doors": len(self.cfg.doors),
+            "version": __version__,
+        }
 
     def cancel_live_ends(self) -> None:
         for task in list(self._live_end_tasks.values()):
@@ -381,6 +395,9 @@ class State:
             self._track_unlock(mapped)
             previous = self.store.last_event(mapped["door"])
             self.store.add_event(mapped)
+            # A new last_seen is a change to the person's state (rule 6).
+            if mapped.get("person"):
+                self.mqtt.refresh(mapped["person"])
             await self.broadcast(mapped)
             await self.notify(mapped, previous=previous)
             await self.update_live_activity(mapped)
@@ -839,10 +856,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         logging.basicConfig(level=logging.INFO)
         _LOGGER.info("Pairing code: %s (expires in 10 min)", state.pair_code)
         await state.apns.start()
+        await state.mqtt.start()
         task = asyncio.create_task(state.ha.run())
         yield
         task.cancel()
         state.cancel_live_ends()
+        await state.mqtt.stop()
         await state.apns.stop()
 
     app = FastAPI(title="Hemnyckel relay", version=__version__, lifespan=lifespan)
@@ -854,13 +873,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @api.get("/health")
     async def health() -> dict[str, Any]:
-        return {
-            "status": "ok",
-            "ha": state.ha.connected,
-            "apns": state.apns.live,
-            "doors": len(cfg.doors),
-            "version": app.version,
-        }
+        return state.health()
 
     @api.post("/pair")
     async def pair(payload: dict[str, Any], request: Request) -> dict[str, Any]:
@@ -892,6 +905,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 person=invited_name or None,
             )
             state.store.use_invite(code, device_id)
+            if invited_name:
+                state.mqtt.refresh(invited_name)
             _LOGGER.info("%s '%s' paired", role, invited_name or payload.get("name"))
             return {"device_token": device_id, "relay_id": "hemnyckel"}
 
@@ -924,6 +939,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         )
         # A re-paired phone replaces its older row rather than adding one.
         state.store.replace_duplicates(device["id"])
+        person = state.store.device(device["id"])["person"]
+        if person:
+            state.mqtt.refresh(str(person))
         return {"ok": True}
 
     @api.get("/events")
@@ -1024,6 +1042,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if role != "owner" and state.store.owner_devices() - state.store.owner_devices(person) < 1:
             raise HTTPException(409, "the last owner cannot be demoted")
         state.store.set_role_for_person(person, role)
+        state.mqtt.refresh(person)
         return {"ok": True}
 
     @api.get("/devices")
@@ -1128,8 +1147,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if target["role"] == "owner" and state.store.owner_count() <= 1:
             raise HTTPException(409, "the last owner cannot be removed")
         # The guest's lock codes go with their device, best-effort.
+        person = str(target["person"]) if target["person"] else None
         await state.revoke_invite_codes(device_id)
         state.store.remove_device(device_id)
+        if person:
+            state.mqtt.refresh(person)
         return {"ok": True}
 
     @api.post("/devices/{device_id}/role")
@@ -1145,6 +1167,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 and state.store.owner_count() <= 1):
             raise HTTPException(409, "the last owner cannot be demoted")
         state.store.set_role(device_id, role)
+        if target["person"]:
+            state.mqtt.refresh(str(target["person"]))
         return {"ok": True}
 
     # -- slots & codes (owner only) ------------------------------------------

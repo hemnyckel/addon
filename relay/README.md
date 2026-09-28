@@ -14,6 +14,7 @@ Apple push notifications — and forwards app actions back to Home Assistant.
 - Maps them to Hemnyckel events (who / when / how / which door).
 - Sends APNs pushes (rich, with Lock/Unlock actions) to paired devices.
 - Serves the app: pairing, event history, live stream, door state, actions.
+- Projects the family's people and roles into Home Assistant over MQTT (optional).
 
 Runs with **no vendor cloud**. Apple Push (APNs) is the only external hop.
 
@@ -49,6 +50,9 @@ Let's Encrypt), and Apple Push is the only outbound hop. What protects the rest:
   `/pair` requires it, and the relay enforces roles itself, so the app's UI is never the guard.
 - **No Home Assistant credentials.** The relay reaches Home Assistant through the supervisor,
   which injects its token; nothing is stored.
+- **The bridge never connects anonymously.** The MQTT broker's host and credentials are
+  injected by the supervisor too; when they are missing the bridge logs once and stays off,
+  rather than falling back to an open connection.
 - **Codes are write-only.** A code is never read back, logged or stored; a new one is returned
   once, to the owner, at creation.
 - **Guests are scoped and they end.** A guest sees only the doors and hours they were given,
@@ -131,6 +135,23 @@ door, and are never logged or stored; the relay keeps only the slot numbers.
 Revoking the guest device — or refusing an expired guest — revokes those codes
 best-effort, so an unreachable lock never fails the revocation. A guest who
 *does* install the app redeems the invitation code exactly as before.
+
+## Roles from Home Assistant
+
+The relay also projects the family into Home Assistant over MQTT: a `select` per
+person for their role, plus a `sensor` and a `binary_sensor` for the relay
+itself, all built from MQTT discovery. Home Assistant supplies the broker — the
+add-on asks for it with `services: mqtt:want` — so nobody types an address or a
+password; if they are missing the bridge stays off.
+
+A role change over MQTT is applied through the *same* store call as one made in
+the app, and the same rule holds: the last owner can never be demoted. After
+every attempt the relay republishes the person's state, so the Home Assistant
+control always shows the truth. The app stays the place for invitations, guests'
+doors and history — the bridge carries roles and health, and nothing else.
+
+See [`docs/mqtt-bridge.md`](../docs/mqtt-bridge.md) for the topics, the payloads
+and the rules.
 
 ## Tests
 

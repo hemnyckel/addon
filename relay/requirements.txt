@@ -5,3 +5,4 @@ httpx[http2]==0.28.*
 PyJWT==2.10.*
 cryptography==44.*
 websockets==14.*
+paho-mqtt==2.1.*
