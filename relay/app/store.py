@@ -471,6 +471,22 @@ class Store:
         ).fetchone()
         return None if row is None or row["ts"] is None else float(row["ts"])
 
+    def event_persons(self) -> list[str]:
+        """Every person name the event history has attributed something to.
+
+        The bridge uses this once, to seed its published-slug registry on an
+        install that predates it: a person renamed in the app left the old name
+        only in this history, and the old retained discovery must be withdrawn.
+        It is a read of history, never a rewrite of it.
+        """
+        return [
+            str(row["person"])
+            for row in self._db.execute(
+                "SELECT DISTINCT person FROM events "
+                "WHERE person IS NOT NULL AND person != '' ORDER BY person"
+            )
+        ]
+
     def presence(self) -> dict[str, dict[str, Any]]:
         """Each person's last known state, with where that knowledge comes from.
 

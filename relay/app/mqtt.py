@@ -40,6 +40,13 @@ DISCOVERY_PREFIX = "homeassistant"
 RELAY_STATE_TOPIC = "hemnyckel/relay/state"
 AVAILABILITY_TOPIC = "hemnyckel/relay/availability"
 
+# The person slugs the bridge last published, kept in the relay's own store so
+# the projection survives a restart. It is a registry, not history: the event
+# log is never touched. Without it a renamed person's old discovery could never
+# be withdrawn, because the rename happens in the app and the bridge only ever
+# hears the new name.
+_PUBLISHED_PEOPLE_KEY = "mqtt_people"
+
 # The relay's own facts are republished on this cadence even when nothing else
 # happens, so a slow change (APNs comes up, a door is added, a new version)
 # cannot leave a stale retained document behind. The Home Assistant connection
@@ -405,6 +412,67 @@ class MqttBridge:
     def _person_state_topic(self, name: str) -> str:
         return f"{NAMESPACE}/people/{slug(name)}/state"
 
+    def withdraw_person(self, name: str) -> None:
+        """Drop a person's retained discovery and state from the broker.
+
+        An empty retained payload is how MQTT discovery removes an entity, and
+        the state topic is cleared with it, so nothing retained lies about a
+        person who is gone or has been renamed.
+        """
+        s = slug(name)
+        if not s:
+            return
+        self.publish(f"{DISCOVERY_PREFIX}/select/{NAMESPACE}/{s}/config", "")
+        self.publish(self._person_state_topic(name), "")
+
+    def _published_slugs(self) -> set[str]:
+        """The slugs the bridge has published, seeded once from history.
+
+        On the first run after this registry was added the setting is absent,
+        and an install that predates it may already carry a stale discovery for
+        a person renamed in the app. The event log still names everyone the
+        bridge could have published, so those names seed the registry and the
+        reconciliation withdraws the ones that are no longer current.
+        """
+        raw = self._store.setting(_PUBLISHED_PEOPLE_KEY)
+        if raw is None:
+            return {slug(name) for name in self._store.event_persons()} - {""}
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return set()
+        if not isinstance(value, list):
+            return set()
+        return {str(item) for item in value if str(item)}
+
+    def _remember_published(self, slugs: set[str]) -> None:
+        encoded = json.dumps(sorted(slugs))
+        # A refresh also runs after every attributed lock event; the registry
+        # only changes when the family does, so skip the write when it has not.
+        if self._store.setting(_PUBLISHED_PEOPLE_KEY) != encoded:
+            self._store.set_setting(_PUBLISHED_PEOPLE_KEY, encoded)
+
+    def _current_slugs(self) -> set[str]:
+        return {slug(str(group.get("name") or "")) for group in self._people()} - {""}
+
+    def _withdraw_stale(self) -> None:
+        """Withdraw every published person the store no longer has.
+
+        A person's identity is their name, and a device is a hardware row: an
+        app rename is the *same* device row carrying a new person string, so the
+        old slug is gone from ``people()`` while the relay's event history keeps
+        the old name (that history is never rewritten). A genuinely new person
+        is a new device row, and a re-paired phone is folded into one row by
+        ``store.replace_duplicates()``, so it never mints a second person. This
+        is why withdrawal is driven by the published slug set and not by
+        deleting anything: the entity goes, the history stays.
+        """
+        current = self._current_slugs()
+        for s in self._published_slugs() - current:
+            self.publish(f"{DISCOVERY_PREFIX}/select/{NAMESPACE}/{s}/config", "")
+            self.publish(f"{NAMESPACE}/people/{s}/state", "")
+        self._remember_published(current)
+
     def publish_person(self, group: dict[str, Any]) -> None:
         name = str(group.get("name") or "")
         if not slug(name):
@@ -423,7 +491,9 @@ class MqttBridge:
 
         Called when the app changes a role, when a device is added, renamed,
         revoked or re-registered, and after every role command. ``None``
-        refreshes the whole projection.
+        refreshes the whole projection. A rename reaches this with the *new*
+        name; the reconciliation then withdraws the old slug from the registry,
+        which is the only place the old name is still known.
         """
         if not self.enabled:
             return
@@ -435,12 +505,13 @@ class MqttBridge:
         if group is None:
             if s:
                 # Withdraw the entity and its state: nothing retained lies.
-                self.publish(f"{DISCOVERY_PREFIX}/select/{NAMESPACE}/{s}/config", "")
-                self.publish(self._person_state_topic(person), "")
+                self.withdraw_person(person)
+            self._withdraw_stale()
             return
         topic, payload = person_discovery(person)
         self.publish(topic, payload)
         self.publish_person(group)
+        self._withdraw_stale()
 
     def publish_all_now(self) -> None:
         """publish_all for synchronous callers (endpoints, callbacks)."""
@@ -452,6 +523,9 @@ class MqttBridge:
             topic, payload = person_discovery(str(group["name"]))
             self.publish(topic, payload)
             self.publish_person(group)
+        # A restart must still withdraw a slug that a rename left behind, so
+        # the full projection ends with the same reconciliation as a refresh.
+        self._withdraw_stale()
 
     def publish_state(self) -> None:
         """Publish the relay's own facts - exactly what ``/health`` reports.

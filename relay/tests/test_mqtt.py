@@ -342,6 +342,72 @@ def test_refresh_withdraws_an_entity_when_the_person_is_gone(cfg, tmp_path):
     assert ("hemnyckel/people/elise/state", "", True) in published
 
 
+def test_a_rename_withdraws_the_old_slug_and_publishes_the_new(cfg, tmp_path):
+    """A person is a name: the same phone re-registers under a new one."""
+    published: list = []
+    bridge, store = make_bridge(cfg, tmp_path, published)
+    add_person(store, "phone", "Claes", role="owner")
+    bridge.refresh("Claes")  # publishes and registers the old slug
+    published.clear()
+
+    store.set_apns("phone", "tok", "John Appleseed", {})
+    bridge.refresh("John Appleseed")
+
+    topics = [topic for topic, _, _ in published]
+    assert ("homeassistant/select/hemnyckel/claes/config", "", True) in published
+    assert ("hemnyckel/people/claes/state", "", True) in published
+    assert "homeassistant/select/hemnyckel/john-appleseed/config" in topics
+    assert "hemnyckel/people/john-appleseed/state" in topics
+
+
+def test_publish_all_withdraws_a_slug_the_store_no_longer_has(cfg, tmp_path):
+    """A restart republishes the truth and takes the stale entity with it."""
+    published: list = []
+    bridge, store = make_bridge(cfg, tmp_path, published)
+    add_person(store, "a", "Claes", role="owner")
+    bridge.publish_all_now()
+    published.clear()
+
+    store.remove_device("a")
+    bridge.publish_all_now()
+
+    assert ("homeassistant/select/hemnyckel/claes/config", "", True) in published
+    assert ("hemnyckel/people/claes/state", "", True) in published
+
+
+def test_the_registry_seeds_from_history_on_the_first_run(cfg, tmp_path):
+    """The migration for an install that already carries a renamed ghost."""
+    published: list = []
+    bridge, store = make_bridge(cfg, tmp_path, published)
+    add_person(store, "phone", "John Appleseed", role="owner")
+    store.add_event({
+        "id": "e1", "ts": 1.0, "door": "front", "person": "Claes",
+        "action": "unlock", "source": "keypad", "method": "Kod", "door_open": False,
+    })
+
+    bridge.publish_all_now()
+
+    topics = [topic for topic, _, _ in published]
+    assert ("homeassistant/select/hemnyckel/claes/config", "", True) in published
+    assert ("hemnyckel/people/claes/state", "", True) in published
+    assert "homeassistant/select/hemnyckel/john-appleseed/config" in topics
+
+
+def test_a_new_person_does_not_withdraw_an_existing_one(cfg, tmp_path):
+    """Only a vanished slug is withdrawn; a second phone is a second person."""
+    published: list = []
+    bridge, store = make_bridge(cfg, tmp_path, published)
+    add_person(store, "a", "Elise")
+    bridge.refresh("Elise")
+    published.clear()
+
+    add_person(store, "b", "Claes")
+    bridge.refresh("Claes")
+
+    assert not any(payload == "" for _topic, payload, _retain in published)
+    assert ("homeassistant/select/hemnyckel/elise/config", "", True) not in published
+
+
 def test_publish_state_publishes_the_same_facts_as_health(cfg, tmp_path):
     published: list = []
     bridge, _ = make_bridge(cfg, tmp_path, published)
