@@ -177,7 +177,7 @@ A guest device:
 ## Slots & codes (owner only)
 
 The lock's slots are where attribution comes from: a **named slot** is what turns
-a journal entry into "Elise" instead of "slot 6". These five endpoints are owner
+a journal entry into "Elise" instead of "slot 6". These endpoints are owner
 only; the relay resolves each door's slot table from Home Assistant's states
 (the `sensor.*_slots` whose `lock` attribute is the door's name, using its
 `entry_id` for the service call) and forwards the matching `hemnyckel.*` service.
@@ -210,6 +210,13 @@ POST /slots/6/finger      { "door": "front", "finger": "left index" }
                           # the owner's label for the finger being enrolled - a
                           # claim, never something the lock reports back.
 
+POST /slots/6/label       { "door": "front", "finger": "left index" }
+  -> 200 { "ok": true, "slot": 6, "finger": "left index" }
+  -> 400 no fingerprint is recorded in slot 6
+                          # names a fingerprint the slot already holds, for the
+                          # unlabelled enrolment that predates labels. No reader
+                          # is lit and no template is written; the label only.
+
 DELETE /slots/6/finger?door=front
   -> 200 { "ok": true, "slot": 6 }   # clears that slot's fingerprint template
 
@@ -224,10 +231,14 @@ list; `finger_state` is `none`, `claimed` or `confirmed`.
 
 `code` and `until` are optional on a code call; when no `code` is given the lock
 generates one and it is returned **exactly once** in this response. A code is
-**write-only**: the relay never reads, logs or stores it. If Home Assistant or
-the lock does not accept a call, the answer is a clean `502
-{"detail": "the lock is not reachable right now; try again"}` — never a raw
-upstream error.
+**write-only**: the relay never reads, logs or stores it.
+
+A label call stays honest about *why* it failed. An unknown door is refused by
+the relay (`400`) before Home Assistant is called; a slot the integration will
+not label — one with no fingerprint — comes back as Home Assistant's own `400`,
+its reason passed through as `{"detail": "…"}`. Only a real outage (Home
+Assistant or the lock unreachable) is the clean `502 {"detail": "the lock is not
+reachable right now; try again"}` — never a raw upstream error.
 
 ## Presence
 

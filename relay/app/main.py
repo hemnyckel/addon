@@ -336,6 +336,21 @@ def _service_row(response: Any, entry_id: str) -> dict[str, Any] | None:
     return next((value for value in response.values() if isinstance(value, dict)), None)
 
 
+def _refusal_reason(response: Any) -> str:
+    """Home Assistant's own words for a refusal, when it gave any.
+
+    The integration raises a validation error for a request it will not take,
+    and Home Assistant answers 400 with the message; that reason is the honest
+    thing to hand the app. Anything without one falls back to a plain phrase.
+    """
+    if isinstance(response, dict):
+        for key in ("message", "error"):
+            value = response.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
 class State:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -1260,6 +1275,38 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not ok:
             raise HTTPException(502, _UPSTREAM_ERROR)
         return {"ok": True, "slot": slot, "finger": finger or None}
+
+    @api.post("/slots/{slot}/label")
+    async def label_finger(slot: int, payload: dict[str, Any],
+                           _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Name a fingerprint the slot already holds — no reader, no template.
+
+        The label is our bookkeeping, not a credential, so a confirmed
+        fingerprint that predates labels is named in place instead of being
+        enrolled a second time. The integration owns the policy and refuses a
+        slot with no fingerprint; that refusal is carried back as a bad request
+        rather than hidden behind the outage answer.
+        """
+        finger = str(payload.get("finger") or "").strip()
+        if not finger:
+            raise HTTPException(400, "a finger label is required")
+        entry_id = await state.slot_entry_id(str(payload.get("door") or ""))
+        status, response = await state.ha.call_service_status(
+            "hemnyckel", "relabel_fingerprint",
+            {"slot": slot, "finger": finger, "entry_id": entry_id},
+        )
+        if 400 <= status < 500:
+            raise HTTPException(
+                400, _refusal_reason(response) or "that slot's fingerprint cannot be labelled"
+            )
+        if status != 200:
+            raise HTTPException(502, _UPSTREAM_ERROR)
+        row = _service_row(response, entry_id)
+        return {
+            "ok": True,
+            "slot": int((row or {}).get("slot") or slot),
+            "finger": str((row or {}).get("finger") or finger),
+        }
 
     @api.delete("/slots/{slot}/finger")
     async def clear_finger(slot: int, door: str,

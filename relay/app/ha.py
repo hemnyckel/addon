@@ -96,6 +96,45 @@ class HaClient:
             return False
         return True
 
+    async def call_service_status(
+        self, domain: str, service: str, data: dict[str, Any]
+    ) -> tuple[int, Any]:
+        """Call a service that returns data, keeping Home Assistant's answer.
+
+        Returns ``(status, body)``: Home Assistant's HTTP status, or ``0`` when
+        the request never reached it. A refusal (4xx) and an outage (5xx) are
+        both failures, but only the first is the caller's to explain — the
+        integration raises a validation error (Home Assistant answers 400) for
+        a request it will not take, and that must not read as an outage. This
+        is what ``call_service_result`` throws away.
+        """
+        if self._http is None:
+            _LOGGER.info("[dev] would call %s.%s %s", domain, service, data)
+            return 200, None
+        try:
+            resp = await self._http.post(
+                f"/api/services/{domain}/{service}?return_response",
+                json=data,
+                headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
+            )
+        except httpx.HTTPError as err:
+            _LOGGER.warning("HA %s.%s failed (%s)", domain, service, err)
+            return 0, None
+        if resp.status_code >= 400:
+            _LOGGER.warning("HA %s.%s -> %s %s", domain, service, resp.status_code, resp.text[:200])
+            try:
+                return resp.status_code, resp.json()
+            except ValueError:
+                return resp.status_code, None
+        try:
+            body = resp.json()
+        except ValueError:
+            return 200, None
+        # Home Assistant wraps a service response under "service_response".
+        if isinstance(body, dict) and "service_response" in body:
+            return 200, body.get("service_response")
+        return 200, body
+
     async def call_service_result(
         self, domain: str, service: str, data: dict[str, Any]
     ) -> tuple[bool, Any]:
@@ -105,28 +144,9 @@ class HaClient:
         upstream 4xx/5xx is reported as a clean ``False`` so the caller can
         answer with a human message instead of leaking Home Assistant's error.
         """
-        if self._http is None:
-            _LOGGER.info("[dev] would call %s.%s %s", domain, service, data)
-            return True, None
-        try:
-            resp = await self._http.post(
-                f"/api/services/{domain}/{service}?return_response",
-                json=data,
-                headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
-            )
-        except httpx.HTTPError as err:
-            _LOGGER.warning("HA %s.%s failed (%s)", domain, service, err)
+        status, body = await self.call_service_status(domain, service, data)
+        if status == 0 or status >= 400:
             return False, None
-        if resp.status_code >= 400:
-            _LOGGER.warning("HA %s.%s -> %s %s", domain, service, resp.status_code, resp.text[:200])
-            return False, None
-        try:
-            body = resp.json()
-        except ValueError:
-            return True, None
-        # Home Assistant wraps a service response under "service_response".
-        if isinstance(body, dict) and "service_response" in body:
-            return True, body.get("service_response")
         return True, body
 
     async def states(self) -> list[dict[str, Any]]:

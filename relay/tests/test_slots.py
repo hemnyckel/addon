@@ -45,6 +45,9 @@ class FakeHa:
         self.calls: list[tuple[str, str, dict]] = []
         self.ok = True
         self.response = None
+        # A specific refusal status (e.g. 400 for a request Home Assistant will
+        # not take); None means success/failure follows ``ok``.
+        self.status: int | None = None
         self.connected = False
 
     async def run(self) -> None:  # pragma: no cover - parity with HaClient
@@ -63,6 +66,12 @@ class FakeHa:
     async def call_service_result(self, domain: str, service: str, data: dict):
         self.calls.append((domain, service, data))
         return self.ok, self.response
+
+    async def call_service_status(self, domain: str, service: str, data: dict):
+        self.calls.append((domain, service, data))
+        if self.status is not None:
+            return self.status, self.response
+        return (200 if self.ok else 502), self.response
 
 
 def make_client(cfg, fake: FakeHa, *, two_doors: bool = False):
@@ -251,6 +260,44 @@ def test_a_fingerprint_can_be_cleared_for_one_slot(cfg):
         )
 
 
+def test_an_unlabelled_fingerprint_can_be_named_in_place(cfg):
+    fake = FakeHa(SLOT_STATES)
+    fake.response = {"ent-front": {"slot": 4, "finger": "left index"}}
+    app = make_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+
+        body = client.post("/api/slots/4/label", headers=owner,
+                           json={"door": "front", "finger": "Left Index"}).json()
+
+        # The integration names the label (normalised); the relay carries it.
+        assert body == {"ok": True, "slot": 4, "finger": "left index"}
+        assert fake.calls[-1] == (
+            "hemnyckel", "relabel_fingerprint",
+            {"slot": 4, "finger": "Left Index", "entry_id": "ent-front"},
+        )
+
+        # A nameless label is refused before Home Assistant is ever called.
+        assert client.post("/api/slots/4/label", headers=owner,
+                           json={"door": "front", "finger": "  "}).status_code == 400
+
+
+def test_a_refused_label_is_a_bad_request_not_an_outage(cfg):
+    """A slot with no fingerprint is the caller's error, not a broken lock."""
+    fake = FakeHa(SLOT_STATES)
+    fake.status = 400
+    fake.response = {"message": "no fingerprint is recorded in slot 6"}
+    app = make_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+
+        response = client.post("/api/slots/6/label", headers=owner,
+                               json={"door": "front", "finger": "left index"})
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "no fingerprint is recorded in slot 6"
+
+
 def test_only_an_owner_may_manage_codes(cfg):
     fake = FakeHa(SLOT_STATES)
     app = make_client(cfg, fake)
@@ -266,6 +313,8 @@ def test_only_an_owner_may_manage_codes(cfg):
                            json={"door": "front", "name": "Elise"}).status_code == 403
         assert client.post("/api/slots/6/finger", headers=user,
                            json={"door": "front"}).status_code == 403
+        assert client.post("/api/slots/6/label", headers=user,
+                           json={"door": "front", "finger": "left index"}).status_code == 403
         assert client.delete("/api/slots/6/finger?door=front",
                              headers=user).status_code == 403
         assert client.delete("/api/slots/6?door=front", headers=user).status_code == 403
@@ -289,3 +338,10 @@ def test_an_upstream_failure_becomes_a_clean_error(cfg):
         # The same clean answer when a code could not be written.
         assert client.post("/api/slots/6/code", headers=owner,
                            json={"door": "front", "name": "Elise"}).status_code == 502
+
+        # And when Home Assistant itself fails behind a label, it is an outage
+        # (502), not the bad request a refusal would be.
+        response = client.post("/api/slots/4/label", headers=owner,
+                               json={"door": "front", "finger": "left index"})
+        assert response.status_code == 502
+        assert response.json()["detail"] == "the lock is not reachable right now; try again"
