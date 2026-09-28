@@ -40,6 +40,12 @@ DISCOVERY_PREFIX = "homeassistant"
 RELAY_STATE_TOPIC = "hemnyckel/relay/state"
 AVAILABILITY_TOPIC = "hemnyckel/relay/availability"
 
+# The relay's own facts are republished on this cadence even when nothing else
+# happens, so a slow change (APNs comes up, a door is added, a new version)
+# cannot leave a stale retained document behind. The Home Assistant connection
+# coming up is the other trigger, and that one is immediate.
+_STATE_REFRESH_INTERVAL = 60.0
+
 # The only payloads a role command may carry.
 ROLES = ("owner", "user", "guest")
 
@@ -311,6 +317,7 @@ class MqttBridge:
         self._publish = publish
         self._client: mqtt.Client | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._refresh_task: asyncio.Task[None] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -336,10 +343,17 @@ class MqttBridge:
         client.connect_async(self._settings.host, self._settings.port)
         client.loop_start()
         self._client = client
+        # Keep the retained facts fresh even when nothing else changes.
+        self._refresh_task = asyncio.create_task(self._refresh_periodically())
         _LOGGER.info("MQTT bridge on: %s:%s as %s",
                      self._settings.host, self._settings.port, self._settings.username)
 
     async def stop(self) -> None:
+        if self._refresh_task is not None:
+            self._refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._refresh_task
+            self._refresh_task = None
         if self._client is None:
             return
         client, self._client = self._client, None
@@ -430,7 +444,7 @@ class MqttBridge:
 
     def publish_all_now(self) -> None:
         """publish_all for synchronous callers (endpoints, callbacks)."""
-        self.publish(RELAY_STATE_TOPIC, self._facts())
+        self.publish_state()
         self.publish(AVAILABILITY_TOPIC, "online")
         for topic, payload in relay_discovery():
             self.publish(topic, payload)
@@ -438,6 +452,21 @@ class MqttBridge:
             topic, payload = person_discovery(str(group["name"]))
             self.publish(topic, payload)
             self.publish_person(group)
+
+    def publish_state(self) -> None:
+        """Publish the relay's own facts - exactly what ``/health`` reports.
+
+        The broker connection happens before the relay has finished connecting
+        to Home Assistant, so the first document says ``"ha": false``. This is
+        called again when Home Assistant comes up, and on a quiet timer, so the
+        retained document converges on the same facts ``/health`` reports.
+        """
+        self.publish(RELAY_STATE_TOPIC, self._facts())
+
+    async def _refresh_periodically(self) -> None:
+        while True:
+            await asyncio.sleep(_STATE_REFRESH_INTERVAL)
+            self.publish_state()
 
     # -- commands -----------------------------------------------------------
     async def command(self, topic: str, payload: str) -> None:

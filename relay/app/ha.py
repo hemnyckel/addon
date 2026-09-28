@@ -21,9 +21,11 @@ EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class HaClient:
-    def __init__(self, cfg: Config, on_event: EventHandler) -> None:
+    def __init__(self, cfg: Config, on_event: EventHandler,
+                 *, on_connected: Callable[[], None] | None = None) -> None:
         self._cfg = cfg
         self._on_event = on_event
+        self._on_connected = on_connected
         self._connected = False
         self._http: httpx.AsyncClient | None = None
 
@@ -57,6 +59,10 @@ class HaClient:
                 raise RuntimeError(f"Home Assistant auth failed: {auth.get('type')}")
             self._connected = True
             _LOGGER.info("Connected to Home Assistant")
+            if self._on_connected is not None:
+                # The relay now knows Home Assistant is up; anything projecting
+                # its facts (the MQTT bridge) can stop claiming it is not.
+                self._on_connected()
             await ws.send(
                 json.dumps(
                     {"id": 1, "type": "subscribe_events",

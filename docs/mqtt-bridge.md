@@ -38,6 +38,11 @@ sees the current truth immediately after a restart instead of waiting for the ne
 | relay → HA | `hemnyckel/people/<slug>/state` | the person, see below |
 | HA → relay | `hemnyckel/people/<slug>/role/set` | `owner`, `user` or `guest` — nothing else |
 
+The relay's own state document is republished when the Home Assistant connection comes up —
+the broker connects first, so the initial document says `"ha": false` — and again on a one-minute
+timer. That is what keeps the retained document equal to `/health`: a slow change (APNs coming
+up, a door added, a new version) is corrected within a minute instead of staying stale forever.
+
 `<slug>` is the person's name lowercased with `[^a-z0-9]+` folded to `-` (stable, readable, and
 what the discovery topic uses too).
 

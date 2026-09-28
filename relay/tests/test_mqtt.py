@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import pytest
 
 from app.mqtt import (
     AVAILABILITY_TOPIC,
+    RELAY_STATE_TOPIC,
     MqttBridge,
     MqttSettings,
     load_settings,
@@ -338,3 +340,36 @@ def test_refresh_withdraws_an_entity_when_the_person_is_gone(cfg, tmp_path):
 
     assert ("homeassistant/select/hemnyckel/elise/config", "", True) in published
     assert ("hemnyckel/people/elise/state", "", True) in published
+
+
+def test_publish_state_publishes_the_same_facts_as_health(cfg, tmp_path):
+    published: list = []
+    bridge, _ = make_bridge(cfg, tmp_path, published)
+
+    bridge.publish_state()
+
+    assert [topic for topic, _, _ in published] == [RELAY_STATE_TOPIC]
+    assert json.loads(published[0][1]) == bridge._facts()
+    assert published[0][2] is True
+
+
+def test_the_relay_facts_are_republished_on_a_quiet_timer(cfg, tmp_path, monkeypatch):
+    """A slow change (APNs, a door, a version) must not leave a stale document."""
+    import app.mqtt as mqtt
+
+    monkeypatch.setattr(mqtt, "_STATE_REFRESH_INTERVAL", 0.01)
+    published: list = []
+    bridge, _ = make_bridge(cfg, tmp_path, published)
+
+    async def run() -> None:
+        task = asyncio.create_task(bridge._refresh_periodically())
+        await asyncio.sleep(0.035)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+    states = [json.loads(p) for topic, p, _ in published if topic == RELAY_STATE_TOPIC]
+    assert len(states) >= 2
+    assert all(state["ha"] is True for state in states)

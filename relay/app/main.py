@@ -333,10 +333,13 @@ class State:
         self.store = Store(cfg.data_dir)
         self.store.ensure_owner()
         self.apns = ApnsClient(cfg)
-        self.ha = HaClient(cfg, self.on_ha_event)
         # The MQTT bridge is a projection of what this store holds, published to
         # Home Assistant; it stays off unless the supervisor injected a broker.
         self.mqtt = MqttBridge(cfg, self.store, version=__version__, facts=self.health)
+        # The bridge connects to the broker before Home Assistant is up, so its
+        # first retained document says "ha": false. The HA connection coming up
+        # is the moment that becomes untrue, and this republishes the facts.
+        self.ha = HaClient(cfg, self.on_ha_event, on_connected=self.mqtt.publish_state)
         self.pair_code = ""
         self.pair_expires = 0.0
         self.new_pair_code()

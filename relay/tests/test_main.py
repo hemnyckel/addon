@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime
 
@@ -43,6 +44,68 @@ def make_state(cfg) -> State:
     state = State(cfg)
     state.apns = FakeApns(PushResult(ok=True, status=200))
     return state
+
+
+class FakeWs:
+    """A websocket that answers auth and then ends the session at once."""
+
+    def __init__(self) -> None:
+        self._replies = [
+            json.dumps({"type": "auth_required"}),
+            json.dumps({"type": "auth_ok"}),
+        ]
+        self.sent: list[str] = []
+
+    async def recv(self) -> str:
+        return self._replies.pop(0)
+
+    async def send(self, data: str) -> None:
+        self.sent.append(data)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+class FakeConnect:
+    """The async context manager ``websockets.connect`` returns."""
+
+    def __init__(self, ws: FakeWs) -> None:
+        self._ws = ws
+
+    async def __aenter__(self) -> FakeWs:
+        return self._ws
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+def test_the_relay_state_is_republished_when_home_assistant_connects(cfg, monkeypatch):
+    """The broker comes first, so the first document says ha=false.
+
+    When Home Assistant comes up the relay knows, and must correct the retained
+    document instead of leaving it disagreeing with /health.
+    """
+    import app.ha as ha
+
+    state = State(cfg)
+    published: list = []
+    state.mqtt._publish = lambda topic, payload, retain: published.append(
+        (topic, payload, retain)
+    )
+    monkeypatch.setattr(ha.websockets, "connect", lambda *a, **k: FakeConnect(FakeWs()))
+
+    asyncio.run(state.ha._session())
+
+    states = [
+        json.loads(payload)
+        for topic, payload, _ in published
+        if topic == "hemnyckel/relay/state"
+    ]
+    assert states, "Home Assistant coming up must republish the relay's facts"
+    assert states[0]["ha"] is True
 
 
 def test_payload_answers_who_when_how(cfg):

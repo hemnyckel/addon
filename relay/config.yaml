@@ -1,5 +1,5 @@
 name: "Hemnyckel"
-version: "0.4.0"
+version: "0.4.1"
 slug: "hemnyckel"
 description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
 url: "https://github.com/hemnyckel/addon"
