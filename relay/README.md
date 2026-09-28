@@ -106,7 +106,7 @@ talks to the relay directly. A lock updates the card to "Låst", which lingers f
 about a minute (an undo window) before the relay ends it; unlocking in that
 window cancels the end. See `../docs/api.md` for the three registration calls.
 
-## Codes (slots)
+## Keys (slots)
 
 The lock's **slots** are where the journal gets its attribution: a named slot is
 what turns an event into "Elise" instead of "slot 6". Owners manage them from the
