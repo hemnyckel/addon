@@ -10,8 +10,10 @@ anywhere: the relay's database stays authoritative and the relay keeps enforcing
   integration for the relay would be a fourth component whose only job is to be a thin client.
 - Home Assistant already speaks MQTT, and MQTT **discovery** turns a published JSON document
   into a real entity with a real control (`select`) — no integration required.
-- Home Assistant can inject the broker's own credentials into an add-on that asks for it
-  (`services: mqtt:want`), so nobody types a broker address or a password.
+- Home Assistant already knows the broker: an add-on that asks for it (`services: mqtt:want`)
+  is handed the broker's host and credentials by the Supervisor, so nobody types a broker
+  address or a password. *How* it is handed over depends on the Supervisor version — see
+  [How the relay finds the broker](#how-the-relay-finds-the-broker).
 
 ## The one rule this design keeps
 
@@ -100,13 +102,43 @@ creating a second entity — and an entity the family has customised keeps its c
 6. A person's state is republished when their devices change (a new pairing, a revocation, a
    rename, a new `last_seen`).
 
+## How the relay finds the broker
+
+`services: mqtt:want` is still what makes Home Assistant responsible for the broker, but
+*how* the Supervisor hands over the details depends on its version. The relay tries these
+sources in order and uses the first one that has a complete host, username and password:
+
+1. **The `MQTT_*` environment** (`MQTT_HOST`, `MQTT_PORT`, `MQTT_USERNAME`,
+   `MQTT_PASSWORD`, `MQTT_SSL`). This is the historic Supervisor injection, and it stays
+   preferred so an installation that already works is untouched.
+2. **The Supervisor's registered MQTT service** (`GET http://supervisor/services/mqtt`,
+   authenticated with the add-on's own `SUPERVISOR_TOKEN`). Current Supervisor versions no
+   longer inject `MQTT_*` into the container — the relay logs "Home Assistant did not
+   provide broker credentials" on such a host even though Mosquitto is running and the
+   add-on asks for MQTT. The Mosquitto app still *registers* the broker as service data,
+   and an app whose `services` list includes `mqtt` may read it. This is the normal path
+   today, and it stays credential-free from the family's point of view: the Supervisor
+   hands over the broker's own `addons` account, not something anyone types.
+3. **The add-on options** `mqtt_host`, `mqtt_port`, `mqtt_user`, `mqtt_password`. The
+   honest last resort for a Supervisor that provides nothing at all: an owner can fill them
+   in on the add-on page. `mqtt_password` is a `password` field, so it is not shown.
+
+A source with only part of the three values is treated as absent, so the bridge never
+connects without authentication.
+
+The order is deliberate. The environment comes first for backwards compatibility; the
+Supervisor's own registered service is preferred over anything typed on the add-on page;
+and the options are the fallback that guarantees the bridge can always be made to run even
+on a host whose Supervisor hands an app nothing.
+
 ## Security
 
-- **The broker must not allow anonymous publishing.** The command topic decides who may manage
-  the family's people, so it travels on an authenticated connection or not at all. The relay
-  takes the broker's credentials from Home Assistant's own service injection
-  (`MQTT_HOST`, `MQTT_USERNAME`, `MQTT_PASSWORD` via `services: mqtt:want`); if they are missing
-  it logs once and stays off rather than falling back to anonymous.
+- **The broker must not allow anonymous publishing.** The command topic decides who may
+  manage the family's people, so it travels on an authenticated connection or not at all.
+  The relay takes the broker's credentials from Home Assistant itself — the injected
+  `MQTT_*` environment, or the Supervisor's registered MQTT service — and only if neither
+  exists does it use the explicit `mqtt_*` options. If no source has them it logs once and
+  stays off rather than falling back to anonymous.
 - **What never crosses the bridge:** lock codes, device tokens, the APNs key, invite codes.
   Only names, roles, device metadata (name, model, OS, last seen) and the relay's own health.
 - The Home Assistant side is guarded by Home Assistant's own authentication: changing a role
@@ -119,7 +151,7 @@ creating a second entity — and an entity the family has customised keeps its c
 | Broker unreachable at start | The relay runs exactly as before; it logs once and retries in the background. The bridge is a convenience, never a dependency. |
 | Broker drops mid-run | Availability goes `offline` (the last will), the entities grey out, and the relay reconnects. |
 | A command arrives while the store is busy | Serialised with the rest of the relay's writes; the reply is the republished truth. |
-| MQTT disabled in Home Assistant | `services: mqtt:want` yields nothing, the bridge stays off, everything else is untouched. |
+| MQTT disabled in Home Assistant, and no `mqtt_*` options | no source has broker credentials; the bridge stays off, everything else is untouched. |
 
 ## What this deliberately is not
 

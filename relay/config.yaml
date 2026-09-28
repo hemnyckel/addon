@@ -1,5 +1,5 @@
 name: "Hemnyckel"
-version: "0.3.0"
+version: "0.4.0"
 slug: "hemnyckel"
 description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
 url: "https://github.com/hemnyckel/addon"
@@ -37,6 +37,14 @@ options:
   apns_topic: ""
   live_enabled: true
   live_attributes_type: "HemnyckelLockAttributes"
+  # The broker. Normally the relay takes it from Home Assistant (the
+  # supervisor-injected MQTT_* environment, or the Supervisor's registered
+  # MQTT service); these are the manual last resort for a Supervisor that
+  # hands the app nothing. See docs/mqtt-bridge.md.
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
   doors: []
 schema:
   ha_url: str
@@ -49,6 +57,10 @@ schema:
   apns_topic: str
   live_enabled: bool
   live_attributes_type: str
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_user: str
+  mqtt_password: password
   doors:
     - id: str
       name: str

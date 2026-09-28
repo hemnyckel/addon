@@ -6,10 +6,13 @@ the relay itself, all built from MQTT discovery. A role change travels the other
 way, on a command topic, and is applied through the *same* store call the app
 uses - enforcement stays in the relay, never in the bridge.
 
-The broker's credentials come from Home Assistant's own service injection
-(``MQTT_HOST`` / ``MQTT_USERNAME`` / ``MQTT_PASSWORD`` via ``services: mqtt:want``).
-If they are absent the bridge logs once and stays off: it never falls back to an
-anonymous connection. See ``docs/mqtt-bridge.md`` for the full design.
+The broker comes from Home Assistant, from the first source that has a complete
+set of credentials: the historic supervisor-injected ``MQTT_*`` environment, the
+broker the Supervisor registers for an app that asked for MQTT (``GET
+/services/mqtt``), or explicit add-on options (``mqtt_host`` / ``mqtt_user`` /
+``mqtt_password``) as a manual last resort. If none has them the bridge logs once
+and stays off: it never falls back to an anonymous connection. See
+``docs/mqtt-bridge.md`` for the full design.
 """
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ import os
 import re
 import time
 import unicodedata
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -176,24 +180,114 @@ class MqttSettings:
     tls: bool
 
 
-def load_settings(environ: dict[str, str] | None = None) -> MqttSettings | None:
-    """The broker Home Assistant injected, or None when it did not.
+# Where a modern Supervisor hands an app the broker the Mosquitto app
+# registered (services: mqtt:want). See docs/mqtt-bridge.md.
+SUPERVISOR_SERVICES_URL = "http://supervisor/services/mqtt"
+
+
+def _settings_from(host: Any, port: Any, username: Any, password: Any,
+                   tls: Any) -> MqttSettings | None:
+    """A complete set of credentials, or None when anything is missing.
 
     All three of host, username and password are required: a partial set is
     treated as absent, so the bridge never connects without authentication.
     """
-    env = os.environ if environ is None else environ
-    host = str(env.get("MQTT_HOST") or "").strip()
-    username = str(env.get("MQTT_USERNAME") or "").strip()
-    password = str(env.get("MQTT_PASSWORD") or "")
+    host = str(host or "").strip()
+    username = str(username or "").strip()
+    password = str(password or "")
     if not host or not username or not password:
         return None
     try:
-        port = int(str(env.get("MQTT_PORT") or "1883"))
-    except ValueError:
-        port = 1883
-    tls = str(env.get("MQTT_SSL") or "").strip().lower() in ("1", "true", "yes", "on")
-    return MqttSettings(host=host, port=port, username=username, password=password, tls=tls)
+        port_number = int(str(port or "1883"))
+    except (TypeError, ValueError):
+        port_number = 1883
+    tls_on = (
+        tls if isinstance(tls, bool)
+        else str(tls or "").strip().lower() in ("1", "true", "yes", "on")
+    )
+    return MqttSettings(host=host, port=port_number, username=username,
+                        password=password, tls=tls_on)
+
+
+def _options_file() -> dict[str, Any]:
+    """Home Assistant add-ons pass their options in /data/options.json."""
+    try:
+        with open("/data/options.json", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _fetch_service(url: str, token: str, timeout: float) -> Any:
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}"}
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def supervisor_settings(
+    *, token: str | None = None,
+    fetch: Callable[[str, str, float], Any] | None = None,
+    timeout: float = 5.0,
+) -> MqttSettings | None:
+    """The broker the Supervisor registers for an app that asked for MQTT.
+
+    A modern Supervisor no longer injects ``MQTT_*`` into the container; the
+    Mosquitto app registers the broker as MQTT service data and this endpoint
+    hands it to an app whose ``services`` list includes ``mqtt``. The bridge is
+    optional, so any failure here is just "no credentials" - never an outage.
+    ``fetch`` is a test seam for the HTTP call.
+    """
+    token = (token if token is not None else os.environ.get("SUPERVISOR_TOKEN", "")).strip()
+    if not token:
+        return None
+    fetch = fetch or _fetch_service
+    try:
+        payload = fetch(SUPERVISOR_SERVICES_URL, token, timeout)
+    except Exception:  # noqa: BLE001 - the bridge is a convenience, never a dependency
+        return None
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        data = payload
+    return _settings_from(data.get("host"), data.get("port"), data.get("username"),
+                          data.get("password"), data.get("ssl"))
+
+
+def load_settings(
+    environ: dict[str, str] | None = None,
+    *,
+    service: Callable[[], MqttSettings | None] | None = None,
+    options: dict[str, Any] | None = None,
+) -> MqttSettings | None:
+    """The broker, from the first source that has complete credentials.
+
+    In order: the environment Home Assistant injects (``MQTT_HOST`` /
+    ``MQTT_USERNAME`` / ``MQTT_PASSWORD``), then the broker the Supervisor
+    registers (``GET /services/mqtt``), then explicit add-on options
+    (``mqtt_host`` / ``mqtt_port`` / ``mqtt_user`` / ``mqtt_password``). The
+    environment stays preferred for compatibility; the options are the honest
+    last resort for a Supervisor that hands the app nothing at all.
+    ``service`` and ``options`` are test seams for the real Supervisor lookup
+    and ``/data/options.json``.
+    """
+    env = os.environ if environ is None else environ
+    settings = _settings_from(env.get("MQTT_HOST"), env.get("MQTT_PORT"),
+                              env.get("MQTT_USERNAME"), env.get("MQTT_PASSWORD"),
+                              env.get("MQTT_SSL"))
+    if settings is not None:
+        return settings
+    service = service or supervisor_settings
+    settings = service()
+    if settings is not None:
+        return settings
+    opts = _options_file() if options is None else options
+    return _settings_from(opts.get("mqtt_host"), opts.get("mqtt_port"),
+                          opts.get("mqtt_user"), opts.get("mqtt_password"),
+                          opts.get("mqtt_ssl"))
 
 
 class MqttBridge:

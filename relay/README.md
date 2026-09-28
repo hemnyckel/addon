@@ -34,6 +34,7 @@ Options (Home Assistant add-on options, or environment variables):
 | `live_enabled` | Keep a Live Activity (Lock Screen / Dynamic Island) in step with an unlocked door (default `true`) |
 | `live_attributes_type` | The iOS `ActivityAttributes` type name the start push targets (default `HemnyckelLockAttributes`) |
 | `doors` | A list of `{id, name, lock_entity, door_sensor?, entry_id?}` |
+| `mqtt_host` / `mqtt_port` / `mqtt_user` / `mqtt_password` | The MQTT broker, only for a Supervisor that hands the add-on no broker of its own — normally Home Assistant supplies it (see *Roles from Home Assistant*) |
 
 Without `apns_key` the relay runs in **dev mode** and logs pushes instead of
 sending them — the whole pipeline can be exercised locally.
@@ -50,9 +51,11 @@ Let's Encrypt), and Apple Push is the only outbound hop. What protects the rest:
   `/pair` requires it, and the relay enforces roles itself, so the app's UI is never the guard.
 - **No Home Assistant credentials.** The relay reaches Home Assistant through the supervisor,
   which injects its token; nothing is stored.
-- **The bridge never connects anonymously.** The MQTT broker's host and credentials are
-  injected by the supervisor too; when they are missing the bridge logs once and stays off,
-  rather than falling back to an open connection.
+- **The bridge never connects anonymously.** The MQTT broker's host and credentials come
+  from Home Assistant itself — the supervisor-injected `MQTT_*` environment, or the
+  Supervisor's registered MQTT service. Only when neither exists does the relay fall back
+  to the explicit `mqtt_*` options; if none has them it logs once and stays off, rather
+  than opening an unauthenticated connection.
 - **Codes are write-only.** A code is never read back, logged or stored; a new one is returned
   once, to the owner, at creation.
 - **Guests are scoped and they end.** A guest sees only the doors and hours they were given,
@@ -142,7 +145,7 @@ The relay also projects the family into Home Assistant over MQTT: a `select` per
 person for their role, plus a `sensor` and a `binary_sensor` for the relay
 itself, all built from MQTT discovery. Home Assistant supplies the broker — the
 add-on asks for it with `services: mqtt:want` — so nobody types an address or a
-password; if they are missing the bridge stays off.
+password; if Home Assistant provides nothing the bridge stays off.
 
 A role change over MQTT is applied through the *same* store call as one made in
 the app, and the same rule holds: the last owner can never be demoted. After

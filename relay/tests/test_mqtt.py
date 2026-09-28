@@ -14,6 +14,7 @@ from app.mqtt import (
     relay_discovery,
     slug,
     state_document,
+    supervisor_settings,
 )
 from app.store import Store
 
@@ -146,16 +147,89 @@ def test_relay_discovery_matches_the_design():
 
 
 def test_broker_settings_need_host_user_and_password():
-    assert load_settings({}) is None
-    assert load_settings({"MQTT_HOST": "broker"}) is None
-    assert load_settings({"MQTT_HOST": "broker", "MQTT_USERNAME": "u"}) is None
-    assert load_settings({"MQTT_HOST": "broker", "MQTT_USERNAME": "u", "MQTT_PASSWORD": ""}) is None
+    # Pure environment lookup: the other sources are stubbed out.
+    no_service = {"service": lambda: None, "options": {}}
+    assert load_settings({}, **no_service) is None
+    assert load_settings({"MQTT_HOST": "broker"}, **no_service) is None
+    assert load_settings({"MQTT_HOST": "broker", "MQTT_USERNAME": "u"}, **no_service) is None
+    assert load_settings(
+        {"MQTT_HOST": "broker", "MQTT_USERNAME": "u", "MQTT_PASSWORD": ""}, **no_service
+    ) is None
 
     settings = load_settings({
         "MQTT_HOST": "broker", "MQTT_USERNAME": "u", "MQTT_PASSWORD": "p",
         "MQTT_PORT": "8883", "MQTT_SSL": "true",
-    })
+    }, **no_service)
     assert settings == MqttSettings("broker", 8883, "u", "p", True)
+
+
+def test_the_environment_is_preferred_over_the_other_sources():
+    settings = load_settings(
+        {"MQTT_HOST": "env", "MQTT_USERNAME": "u", "MQTT_PASSWORD": "p"},
+        service=lambda: MqttSettings("svc", 1883, "u", "p", False),
+        options={"mqtt_host": "opt", "mqtt_user": "u", "mqtt_password": "p"},
+    )
+    assert settings == MqttSettings("env", 1883, "u", "p", False)
+
+
+def test_the_supervisor_registered_broker_is_used_when_the_environment_is_empty():
+    settings = load_settings(
+        {},
+        service=lambda: MqttSettings("core-mosquitto", 1883, "addons", "p", False),
+        options={"mqtt_host": "opt", "mqtt_user": "u", "mqtt_password": "p"},
+    )
+    assert settings == MqttSettings("core-mosquitto", 1883, "addons", "p", False)
+
+
+def test_the_options_are_the_last_resort():
+    settings = load_settings(
+        {},
+        service=lambda: None,
+        options={"mqtt_host": "core-mosquitto", "mqtt_port": 1883,
+                 "mqtt_user": "hemnyckel", "mqtt_password": "p"},
+    )
+    assert settings == MqttSettings("core-mosquitto", 1883, "hemnyckel", "p", False)
+
+
+def test_an_incomplete_option_set_is_treated_as_absent():
+    assert load_settings({}, service=lambda: None,
+                         options={"mqtt_host": "core-mosquitto"}) is None
+    assert load_settings({}, service=lambda: None,
+                         options={"mqtt_host": "core-mosquitto", "mqtt_user": "u"}) is None
+    assert load_settings({}, service=lambda: None,
+                         options={"mqtt_host": "core-mosquitto", "mqtt_user": "u",
+                                  "mqtt_password": ""}) is None
+
+
+def test_supervisor_settings_are_none_without_a_token(monkeypatch):
+    monkeypatch.delenv("SUPERVISOR_TOKEN", raising=False)
+    assert supervisor_settings() is None
+
+
+def test_supervisor_settings_read_the_registered_broker():
+    def fake_fetch(url, token, timeout):
+        assert url == "http://supervisor/services/mqtt"
+        assert token == "tok"
+        return {"result": "ok", "data": {
+            "host": "core-mosquitto", "port": 1883, "username": "addons",
+            "password": "p", "ssl": False, "addon": "core_mosquitto"}}
+
+    settings = supervisor_settings(token="tok", fetch=fake_fetch)
+    assert settings == MqttSettings("core-mosquitto", 1883, "addons", "p", False)
+
+
+def test_supervisor_settings_survive_a_failed_lookup():
+    def broken_fetch(url, token, timeout):
+        raise OSError("no supervisor")
+
+    assert supervisor_settings(token="tok", fetch=broken_fetch) is None
+
+
+def test_supervisor_settings_read_a_partial_payload_as_absent():
+    def partial_fetch(url, token, timeout):
+        return {"host": "core-mosquitto"}
+
+    assert supervisor_settings(token="tok", fetch=partial_fetch) is None
 
 
 # -- commands -----------------------------------------------------------------
