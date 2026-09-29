@@ -143,6 +143,10 @@ def test_the_relay_state_document_carries_the_journal_pulse(cfg):
     ))
     assert document["last_event_at"] == UNLOCK["ts"]
     assert document["events"] == 1
+    # The read side rides along: Home Assistant can watch the path that broke,
+    # not only whether events arrived.
+    assert document["journal_read_at"] == UNLOCK["ts"]
+    assert document["journal_ok"] is True
 
 
 def test_the_origin_is_learned_and_a_photo_republished_absolute(cfg):

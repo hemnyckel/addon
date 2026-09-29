@@ -72,6 +72,7 @@ GET /state
                    "last_home":1758..., "stale":false }
       },
       "role": "owner", "device_id": "...", "expires": null,
+      "last_event_at": 1758...,
       "relay": { "online": true, "apns": true }
     }
 ```
@@ -81,7 +82,10 @@ a shelf life (see [Presence](#presence)). `state` is the effective state now,
 `source` is `geofence` (the truth) or `lock` (a brief hint), `at` is when it was
 last confirmed, `last_home` is the last confirmed home (so a lapsed one can read
 "senast hemma 09:17"), and `stale` marks a `home` whose confirmation has run
-out. It is empty for a guest.
+out. It is empty for a guest. `last_event_at` is the journal's **ingest** truth
+— the newest event's timestamp, `null` on an empty journal — the same pulse
+`/health` reports, so the app can tell "no events" from "the read path is
+behind".
 
 ## Actions
 
@@ -388,16 +392,26 @@ POST /settings/home       # owner only, set once for the whole family
 
 ```
 GET /health      -> { "status": "ok", "ha": true, "apns": true, "version": "...",
-                      "last_event_at": <epoch|null>, "events": <count> }
+                      "last_event_at": <epoch|null>, "journal_read_at": <epoch|null>,
+                      "journal_ok": true, "events": <count> }
 GET /api/health  -> the same
 ```
 
 The root path stays open for probes; `apns` is true only when a real key is
-loaded. `last_event_at` is the newest event's timestamp (the journal's pulse,
-`null` on an empty journal) and `events` is how many the relay holds, so "is the
-journal still receiving?" is answerable from outside. The same facts are also
-published, retained, for Home Assistant's MQTT bridge (see
-[`mqtt-bridge.md`](mqtt-bridge.md)).
+loaded. `last_event_at` is the newest event's timestamp (the journal's **ingest**
+pulse, `null` on an empty journal) and `events` is how many the relay holds, so
+"is the journal still receiving?" is answerable from outside.
+
+`journal_read_at` is the newest timestamp the **read path** actually hands back
+— measured through the same `Store.events()` call `GET /events` serves from, not
+a second query — and `journal_ok` says whether that read side shows the newest
+ingested event (within a small slack, so an event arriving between the two reads
+is not a divergence; an empty journal is healthy). The two are watched
+separately on purpose: the first journal bug was invisible to an ingest-only
+pulse, because the events were stored and simply never readable. When the read
+path diverges the relay logs one warning naming both timestamps — once per
+divergence, not per poll. The same facts are also published, retained, for Home
+Assistant's MQTT bridge (see [`mqtt-bridge.md`](mqtt-bridge.md)).
 
 ## Event object
 

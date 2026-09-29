@@ -35,7 +35,7 @@ sees the current truth immediately after a restart instead of waiting for the ne
 
 | Direction | Topic | Payload |
 |---|---|---|
-| relay → HA | `hemnyckel/relay/state` | `{"status":"ok","ha":true,"apns":false,"doors":2,"version":"0.2.2"}` — the same facts as `/health`, retained |
+| relay → HA | `hemnyckel/relay/state` | `{"status":"ok","ha":true,"apns":false,"doors":2,"version":"0.8.4","last_event_at":1758…,"journal_read_at":1758…,"journal_ok":true,"events":232}` — the same facts as `/health`, retained |
 | relay → HA | `hemnyckel/relay/availability` | `online` / `offline` (also the client's last will, so a dead relay says so) |
 | relay → HA | `hemnyckel/people/<slug>/state` | the person, see below |
 | HA → relay | `hemnyckel/people/<slug>/role/set` | `owner` or `user` — nothing else |
@@ -44,6 +44,15 @@ The relay's own state document is republished when the Home Assistant connection
 the broker connects first, so the initial document says `"ha": false` — and again on a one-minute
 timer. That is what keeps the retained document equal to `/health`: a slow change (APNs coming
 up, a door added, a new version) is corrected within a minute instead of staying stale forever.
+
+The document carries the journal's pulse in two independent halves: `last_event_at` is the
+**ingest** truth (the newest event stored, `null` on an empty journal) and `events` is how much
+the relay holds, while `journal_read_at` is the newest event the **read path** actually hands
+back and `journal_ok` says whether the read side is keeping up with ingest. They are separate
+because the first journal bug was invisible to an ingest-only pulse — the events arrived and
+were stored, but the read path returned the oldest window, so the app's History froze. Home
+Assistant watches both, so a read-side fault raises its own alarm instead of masquerading as
+"the journal is quiet".
 
 `<slug>` is the person's name lowercased with `[^a-z0-9]+` folded to `-` (stable, readable, and
 what the discovery topic uses too).
@@ -91,7 +100,7 @@ the locks are the integration's devices, the relay is this one.
 | Entity | Kind | What it is |
 |---|---|---|
 | `select.hemnyckel_<slug>` | `select`, options `owner`/`user` | the person's role. Its attributes carry the devices, the guest window and the expiry, so one row tells the whole story |
-| `sensor.hemnyckel_relaet` | `sensor` | the relay: state `ok`, attributes `ha`, `apns`, `doors`, `version` |
+| `sensor.hemnyckel_relaet` | `sensor` | the relay: state `ok`, attributes `ha`, `apns`, `doors`, `version`, and the journal's pulse — `last_event_at`, `journal_read_at`, `journal_ok`, `events` |
 | `binary_sensor.hemnyckel_apns` | `binary_sensor`, device class `connectivity` | whether push is configured — the thing you want to glance at the day the Apple key lands |
 
 Discovery payloads (relay → `homeassistant/<component>/hemnyckel/<object>/config`, retained):

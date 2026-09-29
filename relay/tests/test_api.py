@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Door
 from app.main import create_app
+from app.store import EVENTS_MAX
 
 
 def test_http_surface(cfg):
@@ -974,10 +976,76 @@ def test_health_carries_the_journal_pulse(cfg):
         hmk = app.state.hmk
         empty = client.get("/health").json()
         assert empty["last_event_at"] is None
+        # An empty journal is not a divergence: there is nothing to read, so
+        # the read side is not "behind".
+        assert empty["journal_read_at"] is None
+        assert empty["journal_ok"] is True
         assert empty["events"] == 0
 
         hmk.store.add_event(_event(1700000000))
 
         body = client.get("/health").json()
         assert body["last_event_at"] == 1700000000.0
+        # The read path hands back the same newest event, so the read-side pulse
+        # is healthy even though it is measured separately from ingest.
+        assert body["journal_read_at"] == 1700000000.0
+        assert body["journal_ok"] is True
         assert body["events"] == 1
+
+
+def test_health_warns_once_when_the_read_path_lags(cfg, caplog):
+    """The read side is what broke before: events were stored but the read path
+    handed back the oldest window, so /api/events and the app's History froze.
+
+    The forced regression restores exactly that mistake - the window taken from
+    the oldest end - and the read-side pulse must catch it, name both
+    timestamps, and log once per divergence rather than on every poll.
+    """
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        for i in range(3):
+            hmk.store.add_event(_event(1700000000 + i * 100))
+        real_events = hmk.store.events
+
+        def old_ascending_window(*, since=None, before=None, door=None,
+                                 person=None, limit=EVENTS_MAX):
+            # The pre-fix window: ascending from the oldest end, so the newest
+            # events are ingested but never returned.
+            return real_events(limit=EVENTS_MAX)[:limit]
+
+        hmk.store.events = old_ascending_window  # type: ignore[method-assign]
+
+        with caplog.at_level(logging.WARNING, logger="hemnyckel"):
+            first = client.get("/health").json()
+            second = client.get("/health").json()
+
+    assert first["journal_ok"] is False
+    assert first["journal_read_at"] == 1700000000.0
+    assert first["last_event_at"] == 1700000200.0
+    assert second["journal_ok"] is False
+
+    warnings = [
+        record.getMessage() for record in caplog.records
+        if "journal read path is behind" in record.getMessage()
+    ]
+    assert len(warnings) == 1, "a divergence is logged once, not per poll"
+    assert "1700000000.0" in warnings[0]
+    assert "1700000200.0" in warnings[0]
+
+
+def test_the_state_endpoint_carries_the_journal_ingest_truth(cfg):
+    """/api/state carries last_event_at too, so the app can tell "no events"
+    from "the read path is behind" the same way /health can."""
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        hmk.store.add_device("dev1", "Claes' iPhone")
+        auth = {"Authorization": "Bearer dev1"}
+
+        assert client.get("/api/state", headers=auth).json()["last_event_at"] is None
+
+        hmk.store.add_event(_event(1700000000))
+
+        body = client.get("/api/state", headers=auth).json()
+        assert body["last_event_at"] == 1700000000.0

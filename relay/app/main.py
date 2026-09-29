@@ -72,6 +72,10 @@ _MAX_CONCURRENT_PUSHES = 16
 _UPSTREAM_ERROR = "the lock is not reachable right now; try again"
 # Credential-kind labels used to derive marks from the individual booleans.
 _CREDENTIAL_KINDS = (("pin", "has_pin"), ("fingerprint", "has_fingerprint"), ("rfid", "has_rfid"))
+# The read-side pulse compares two reads of the same journal, so an event that
+# lands between them may make them differ by a fraction of a second. That is not
+# a divergence: the bug this watches for hid whole windows, never a second.
+_JOURNAL_READ_EPSILON = 1.0
 
 
 def _prefs(raw: str | None) -> dict[str, Any]:
@@ -389,22 +393,64 @@ class State:
         self._last_unlock: dict[str, float] = {}
         # Pairing attempts per client, to bound brute force.
         self._pair_attempts: dict[str, list[float]] = {}
+        # Whether the journal's read path was already reported as diverging, so
+        # the warning is logged once per divergence and not on every poll.
+        self._journal_diverged = False
+
+    def _journal_status(self) -> tuple[float | None, float | None, bool]:
+        """The journal's read side: newest ingested, newest readable, and whether
+        the read path is keeping up.
+
+        ``last_event_at()`` is the ingest truth; the readable timestamp is taken
+        through the *same* ``Store.events()`` the ``/api/events`` handler serves
+        from, one row deep - not a second hand-rolled query. The read-side bug
+        this guards against returned the oldest window, so once the journal
+        outgrew it the newest events were ingested but never readable. Comparing
+        the two reads catches exactly that (and would catch any future window
+        mistake), while a tiny slack absorbs an event arriving in between.
+
+        A divergence is logged once, when it appears, not on every poll.
+        """
+        ingested = self.store.last_event_at()
+        newest = self.store.events(limit=1)
+        read_at = float(newest[-1]["ts"]) if newest else None
+        if ingested is None or read_at is None:
+            # An empty journal is healthy; a readable event with no ingest
+            # truth (or the reverse) is not.
+            ok = ingested is None and read_at is None
+        else:
+            ok = read_at >= ingested - _JOURNAL_READ_EPSILON
+        if not ok and not self._journal_diverged:
+            _LOGGER.warning(
+                "journal read path is behind: newest readable event %s, "
+                "newest ingested %s",
+                read_at, ingested,
+            )
+        self._journal_diverged = not ok
+        return ingested, read_at, ok
 
     def health(self) -> dict[str, Any]:
         """The relay's facts, shared by ``/health`` and the MQTT bridge.
 
-        ``last_event_at`` is the journal's pulse - the newest event's timestamp
-        (None on an empty journal) - and ``events`` is how much it holds. They
-        make "is the journal still receiving?" answerable from outside, and
-        watchable in Home Assistant through the bridge.
+        ``last_event_at`` is the journal's *ingest* pulse - the newest event's
+        timestamp (None on an empty journal) - and ``events`` is how much it
+        holds. ``journal_read_at`` is the newest timestamp the read path
+        actually hands back (built through the same ``Store.events()`` the app
+        calls), and ``journal_ok`` says whether the read side shows the newest
+        ingested event. Ingest and read are watched separately on purpose: the
+        first bug was invisible to an ingest-only pulse because the events were
+        stored and simply never readable.
         """
+        ingested, read_at, ok = self._journal_status()
         return {
             "status": "ok",
             "ha": self.ha.connected,
             "apns": self.apns.live,
             "doors": len(self.cfg.doors),
             "version": __version__,
-            "last_event_at": self.store.last_event_at(),
+            "last_event_at": ingested,
+            "journal_read_at": read_at,
+            "journal_ok": ok,
             "events": self.store.event_count(),
         }
 
@@ -1260,6 +1306,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "expires": device.get("expires"),
             "schedule": schedule,
             "home": json.loads(home) if home else None,
+            # The journal's ingest truth, so the app can tell "no events" from
+            # "the read path is behind" the same way /health can.
+            "last_event_at": state.store.last_event_at(),
             "relay": {"online": True, "apns": state.apns.live},
         }
 
