@@ -1199,7 +1199,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def door_states(device: dict = Depends(require_device)) -> dict[str, Any]:
         doors = [await state.door_state(d) for d in cfg.doors]
         role = device.get("role", "user")
-        presence: dict[str, str] = {}
+        presence: dict[str, Any] = {}
         schedule = None
         if role == "guest":
             # Only their doors, and never who is home.

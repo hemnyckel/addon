@@ -63,8 +63,11 @@ iPad: `NavigationSplitView` (sidebar: doors + people; detail: a door).
   (≥44 pt); a secondary "door open/closed" row when a door sensor exists.
 - Optimistic UI: immediate haptic + a "working" state, confirmed by the real
   state, with a clear, recoverable banner on failure.
-- Presence row: a monogram per person, Home/Away derived from the latest
-  attributed event.
+- Presence row: a monogram per person, Home/Away from their **phone's geofence**
+  — the only thing that sets presence. It has a shelf life: a `home` expires a
+  few hours after it was last confirmed, an unlock only ever *supports* it
+  briefly (never for hours), and someone whose signal went quiet reads as away
+  with "senast hemma HH:mm". The board shows only geofence-confirmed people.
 - States: **offline** (relay/HA down) dims the surface and explains how to retry;
   **unknown** ("unattributed"); **first run** guides pairing.
 

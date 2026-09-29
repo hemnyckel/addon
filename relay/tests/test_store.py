@@ -163,35 +163,91 @@ def test_role_defaults_and_owner_bootstrap(tmp_path):
     assert store.owner_count() == 1
 
 
-def test_presence_follows_each_person_not_each_door(tmp_path):
+def test_presence_needs_a_geofence_report(tmp_path):
     store = Store(str(tmp_path))
+    # A lock event alone - an unlock, or an automatic relock with no person -
+    # is never presence: the board shows only geofence-confirmed people.
     store.add_event(event(1, id="a", door="front", person="Elise", action="unlock"))
-    store.add_event(event(2, id="b", door="front", person=None, action="lock"))  # auto
-    store.add_event(event(3, id="c", door="back", person="Pappa", action="unlock"))
-    store.add_event(event(4, id="d", door="back", person="Pappa", action="lock"))
+    store.add_event(event(2, id="b", door="front", person=None, action="lock"))
+    store.add_event(event(3, id="c", door="back", person="Pappa", action="lock"))
 
-    # Elise is still home: the automatic relock carries no person.
-    now = store.presence()
-    assert now["Elise"]["state"] == "home" and now["Elise"]["source"] == "lock"
-    assert now["Pappa"]["state"] == "away"
+    assert store.presence() == {}
+
+    # The phone's own report is what puts someone on the board.
+    store.set_presence("Elise", "home")
+    assert store.presence()["Elise"]["state"] == "home"
+    assert store.presence()["Elise"]["source"] == "geofence"
 
 
-def test_presence_merges_lock_events_and_geofence_reports(tmp_path):
+def test_a_home_nothing_confirms_stops_reading_as_home(tmp_path):
     store = Store(str(tmp_path))
     now = time.time()
 
-    # An unlock a while ago, then a geofence report just now: she has left.
-    store.add_event(event(1, id="a", person="Elise", action="unlock", ts=now - 600))
-    store.set_presence("Elise", "away")
-    assert store.presence()["Elise"]["state"] == "away"
-    assert store.presence()["Elise"]["source"] == "geofence"
+    # A fresh report is home; five hours later the same row is not.
+    store.set_presence("Elise", "home")
+    aged = now - 5 * 3600
+    store._db.execute(
+        "UPDATE presence SET updated = ?, last_home = ? WHERE person = 'Elise'",
+        (aged, aged),
+    )
+    assert store.presence(now=now)["Elise"] == {
+        "state": "away", "source": "geofence", "at": aged,
+        "last_home": aged, "stale": True,
+    }
 
-    # The other way round: a report, then a fresh unlock: he is home again.
-    store.add_event(event(2, id="b", person="Pappa", action="lock", ts=now - 600))
+
+def test_a_lapsed_home_is_held_briefly_by_a_recent_unlock(tmp_path):
+    store = Store(str(tmp_path))
+    now = time.time()
+    aged = now - 5 * 3600
+
+    # A lapsed geofence home plus an unlock a few minutes ago: the hint holds it.
+    store.set_presence("Elise", "home")
+    store._db.execute(
+        "UPDATE presence SET updated = ?, last_home = ? WHERE person = 'Elise'",
+        (aged, aged),
+    )
+    store.add_event(event(1, id="a", person="Elise", action="unlock", ts=now - 600))
+    assert store.presence(now=now)["Elise"] == {
+        "state": "home", "source": "lock", "at": now - 600,
+        "last_home": aged, "stale": False,
+    }
+
+    # An unlock older than the hint window is history, not corroboration.
+    store.set_presence("Isabelle", "home")
+    store._db.execute(
+        "UPDATE presence SET updated = ?, last_home = ? WHERE person = 'Isabelle'",
+        (aged, aged),
+    )
+    store.add_event(event(2, id="b", person="Isabelle", action="unlock", ts=now - 2 * 3600))
+    assert store.presence(now=now)["Isabelle"]["state"] == "away"
+    assert store.presence(now=now)["Isabelle"]["stale"] is True
+
+
+def test_an_unlock_never_turns_an_away_into_home(tmp_path):
+    store = Store(str(tmp_path))
+    now = time.time()
     store.set_presence("Pappa", "away")
-    store._db.execute("UPDATE presence SET updated = ? WHERE person = 'Pappa'", (now - 300,))
-    store.add_event(event(3, id="c", person="Pappa", action="unlock", ts=now - 10))
-    assert store.presence()["Pappa"] == {"state": "home", "source": "lock", "at": now - 10}
+    store.add_event(event(1, id="a", person="Pappa", action="unlock", ts=now - 30))
+
+    # The phone said he left; an unlock is a hint, not a location, so it may
+    # not put him back on the board.
+    assert store.presence(now=now)["Pappa"]["state"] == "away"
+    assert store.presence(now=now)["Pappa"]["source"] == "geofence"
+
+
+def test_last_home_survives_a_later_away_report(tmp_path):
+    store = Store(str(tmp_path))
+    store.set_presence("Elise", "home")
+    home_at = store._db.execute(
+        "SELECT updated FROM presence WHERE person = 'Elise'"
+    ).fetchone()["updated"]
+    store.set_presence("Elise", "away")
+
+    entry = store.presence()["Elise"]
+    assert entry["state"] == "away"
+    assert entry["stale"] is False
+    assert entry["last_home"] == home_at
 
 
 def test_guest_slots_round_trip_and_rename(tmp_path):

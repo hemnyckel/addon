@@ -186,6 +186,29 @@ def test_a_phone_reports_presence_and_the_owner_sets_home(cfg):
         }
 
 
+def test_a_stale_home_is_not_home_on_the_board(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "Owner"}).json()["device_token"]}
+        client.post("/api/register", headers=owner,
+                    json={"apns_token": "", "person": "Isabelle"})
+        client.post("/api/presence", headers=owner, json={"state": "home"})
+
+        # The same row hours later must stop reading as home, and still say when
+        # she was last actually there.
+        old = time.time() - 6 * 3600
+        hmk.store._db.execute(
+            "UPDATE presence SET updated = ?, last_home = ? WHERE person = 'Isabelle'",
+            (old, old),
+        )
+        presence = client.get("/api/state", headers=owner).json()["presence"]["Isabelle"]
+        assert presence["state"] == "away"
+        assert presence["stale"] is True
+        assert presence["last_home"] == old
+
+
 def test_only_the_owner_sets_home(cfg):
     app = create_app(cfg)
     with TestClient(app) as client:

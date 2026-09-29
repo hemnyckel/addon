@@ -10,6 +10,17 @@ from typing import Any
 
 _LOGGER = logging.getLogger("hemnyckel.store")
 
+# Presence has a shelf life. A phone's geofence is the truth, and a `home` it
+# reported is trusted for this long; after that the person stops reading as
+# home. Hours, not days: long enough to cover an outing or a school run that the
+# phone never explicitly left, short enough that one geofence blip cannot pin
+# someone "home" for a whole day.
+_PRESENCE_TTL = 4 * 3600
+# An unlock is a hint, never a source. It can corroborate a home that has just
+# lapsed, for this long - but it never sets presence by itself, and never for
+# the hours a geofence does.
+_UNLOCK_HINT = 30 * 60
+
 
 def _row(row: sqlite3.Row) -> dict[str, Any]:
     """A row as a dict, with `door_open` normalised to a real bool or None."""
@@ -110,7 +121,8 @@ class Store:
             CREATE TABLE IF NOT EXISTS presence (
                 person TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
-                updated REAL NOT NULL
+                updated REAL NOT NULL,
+                last_home REAL
             );
             CREATE TABLE IF NOT EXISTS live_activities (
                 device TEXT NOT NULL,
@@ -157,6 +169,16 @@ class Store:
             self._db.execute("ALTER TABLE devices ADD COLUMN device_model TEXT")
         if "device_os" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN device_os TEXT")
+        # Presence gained the last confirmed home, so a lapsed `home` can still
+        # say when it was last true ("senast hemma 09:17"). A row that says home
+        # right now is its own last home; older rows have no earlier time to
+        # recover, and an absent value stays honestly unknown.
+        presence_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(presence)")}
+        if "last_home" not in presence_columns:
+            self._db.execute("ALTER TABLE presence ADD COLUMN last_home REAL")
+        self._db.execute(
+            "UPDATE presence SET last_home = updated WHERE state = 'home' AND last_home IS NULL"
+        )
         invite_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(invites)")}
         for column, ddl in (
             ("role", "ALTER TABLE invites ADD COLUMN role TEXT NOT NULL DEFAULT 'guest'"),
@@ -588,40 +610,78 @@ class Store:
             )
         ]
 
-    def presence(self) -> dict[str, dict[str, Any]]:
-        """Each person's last known state, with where that knowledge comes from.
+    def presence(self, *, now: float | None = None) -> dict[str, dict[str, Any]]:
+        """Each person's presence, from their phone's geofence, with a shelf life.
 
-        Two signals, latest wins: a lock event attributed to them (an unlock is
-        an arrival, a lock a departure) and an explicit report from their phone
-        (the home geofence). The source travels with it, so the app can tell
-        "inside the zone" from "last unlocked here".
+        The geofence is the truth: a phone's own enter/exit report is the only
+        thing that sets presence, and a ``home`` is trusted for ``_PRESENCE_TTL``.
+        Once that window has passed the person reads as away again, with the time
+        of the last confirmed home kept in ``last_home`` (what the app can show as
+        "senast hemma"). An ``away`` never expires - it stays until a later
+        report - because away is not a claim that needs a clock.
+
+        An unlock is a hint that travels with ``source: "lock"``: it can keep a
+        home that has just lapsed for ``_UNLOCK_HINT``, but it never sets presence
+        on its own, never flips an explicit away back to home, and never lasts the
+        hours a geofence does. A person the relay has never seen a geofence report
+        from has no presence at all - the board never guesses.
         """
-        latest: dict[str, tuple[float, dict[str, Any]]] = {}
+        moment = time.time() if now is None else now
+        latest_unlock: dict[str, float] = {}
         for row in self._db.execute(
-            "SELECT person, action, ts FROM events WHERE person IS NOT NULL ORDER BY ts"
+            "SELECT person, MAX(ts) AS ts FROM events "
+            "WHERE person IS NOT NULL AND action = 'unlock' GROUP BY person"
         ):
-            moment = float(row["ts"])
-            latest[str(row["person"])] = (moment, {
-                "state": "home" if row["action"] == "unlock" else "away",
-                "source": "lock",
-                "at": moment,
-            })
-        for row in self._db.execute("SELECT person, state, updated FROM presence"):
+            latest_unlock[str(row["person"])] = float(row["ts"])
+
+        result: dict[str, dict[str, Any]] = {}
+        for row in self._db.execute(
+            "SELECT person, state, updated, last_home FROM presence"
+        ):
             person = str(row["person"])
-            moment = float(row["updated"])
-            if person not in latest or moment > latest[person][0]:
-                latest[person] = (moment, {
-                    "state": str(row["state"]),
-                    "source": "geofence",
-                    "at": moment,
-                })
-        return {person: value for person, (_, value) in latest.items()}
+            state = str(row["state"])
+            updated = float(row["updated"])
+            recorded = row["last_home"]
+            last_home = float(recorded) if recorded is not None else (
+                updated if state == "home" else None
+            )
+            if state == "home" and moment - updated > _PRESENCE_TTL:
+                unlock_at = latest_unlock.get(person)
+                if unlock_at is not None and moment - unlock_at <= _UNLOCK_HINT:
+                    # The geofence home has lapsed; a recent unlock is all that
+                    # still holds it, so it is tagged as the hint it is.
+                    result[person] = {
+                        "state": "home", "source": "lock", "at": unlock_at,
+                        "last_home": last_home, "stale": False,
+                    }
+                    continue
+                # Nothing has confirmed this home within its shelf life: it is
+                # no longer home, but the last known state and its time remain.
+                result[person] = {
+                    "state": "away", "source": "geofence", "at": updated,
+                    "last_home": last_home, "stale": True,
+                }
+                continue
+            result[person] = {
+                "state": state, "source": "geofence", "at": updated,
+                "last_home": last_home, "stale": False,
+            }
+        return result
 
     def set_presence(self, person: str, state: str) -> None:
+        """Record a phone's geofence report, keeping the last confirmed home.
+
+        ``last_home`` only ever moves forward on a home report, so a later away
+        does not erase when the person was last actually at home.
+        """
+        now = time.time()
         self._db.execute(
-            "INSERT INTO presence (person, state, updated) VALUES (?, ?, ?) "
-            "ON CONFLICT(person) DO UPDATE SET state = excluded.state, updated = excluded.updated",
-            (person, state, time.time()),
+            "INSERT INTO presence (person, state, updated, last_home) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(person) DO UPDATE SET state = excluded.state, "
+            "updated = excluded.updated, "
+            "last_home = CASE WHEN excluded.state = 'home' THEN excluded.updated "
+            "ELSE presence.last_home END",
+            (person, state, now, now if state == "home" else None),
         )
         self._db.commit()
 

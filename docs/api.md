@@ -57,15 +57,23 @@ GET /state
   -> 200 {
       "doors": [ { "id":"front","name":"...","locked":true,"open":false,
                    "battery":92,"last_event":Event } ],
-      "presence": { "claes":"home", "anna":"away" },
+      "presence": {
+        "claes": { "state":"home", "source":"geofence", "at":1758...,
+                   "last_home":1758..., "stale":false },
+        "anna":  { "state":"away", "source":"geofence", "at":1758...,
+                   "last_home":1758..., "stale":false }
+      },
       "role": "owner", "device_id": "...", "expires": null,
       "relay": { "online": true, "apns": true }
     }
 ```
 
-`presence` is per **person**, from each person's most recent attributed event —
-an automatic relock carries no person, so it never makes someone vanish from the
-board. It is empty for a guest.
+`presence` is per **person** and comes from that person's phone geofence, with
+a shelf life (see [Presence](#presence)). `state` is the effective state now,
+`source` is `geofence` (the truth) or `lock` (a brief hint), `at` is when it was
+last confirmed, `last_home` is the last confirmed home (so a lapsed one can read
+"senast hemma 09:17"), and `stale` marks a `home` whose confirmation has run
+out. It is empty for a guest.
 
 ## Actions
 
@@ -284,9 +292,26 @@ reachable right now; try again"}` — never a raw upstream error.
 ## Presence
 
 Every phone watches a geofence around the house and reports when it comes and
-goes. That is what makes a departure real — an unlock is an immediate arrival,
-but only leaving the zone says someone is out (and an automatic relock is never
-a departure).
+goes. The geofence is the **truth**: a phone's own enter/exit report is the only
+thing that sets presence. An unlock (app, keypad, finger or tag) is only a
+**hint** — a door can see an arrival, but it is not a location, and an app unlock
+can be pressed from anywhere — so it never sets presence by itself.
+
+Presence has a **shelf life**. A geofence `home` is trusted for **4 hours**
+measured from the report; after that the person reads as `away` again, with
+`stale: true` and `last_home` still carrying the time of the last confirmation
+(what the app can show as "senast hemma 09:17"). A phone that goes quiet — a
+dead battery, a missed exit event, a geofence blip — therefore cannot pin
+someone "home" for a day. A geofence `away` does not expire: away is not a claim
+that needs a clock, and it stands until a later report.
+
+Four hours is deliberate: long enough to cover an outing or a school run the
+phone never explicitly reported leaving, short enough that one blip has expired
+within the same half-day. An unlock can corroborate a home that has *just*
+lapsed, for 30 minutes, and only that; such an entry is tagged `source: "lock"`,
+never `geofence`, so the board — which shows only geofence-confirmed people —
+never guesses from it. A person the relay has never seen a geofence report from
+has no presence at all.
 
 ```
 POST /presence            Authorization: Bearer <device_token>
@@ -298,8 +323,7 @@ POST /settings/home       # owner only, set once for the whole family
   -> 200 { "ok": true, "radius": 150 }
 ```
 
-`GET /state` returns `home`, so every phone configures the same zone, and
-`presence` merges the newest signal per person (a lock event or a report).
+`GET /state` returns `home`, so every phone configures the same zone.
 
 ## Health
 
