@@ -198,11 +198,21 @@ def test_person_discovery_carries_the_icon_a_tile_can_draw():
     assert "entity_picture" not in symbol
 
     # A photo becomes an authenticated entity_picture, versioned so a changed
-    # photo is a changed URL. The bytes never cross the bridge.
+    # photo is a changed URL. The bytes never cross the bridge. The URL is
+    # absolute because Home Assistant validates entity_picture with cv.url and
+    # rejects a relative path, so the view path carries Home Assistant's origin.
     _, photo = person_discovery(
+        "Elise", {"kind": "photo", "version": 4}, person_id="abc123",
+        base_url="https://ha.example",
+    )
+    assert photo["entity_picture"] == "https://ha.example/api/hemnyckel/avatar/abc123?v=4"
+
+    # Without an origin there is no picture rather than a URL Home Assistant
+    # would refuse; the tile then falls back to the avatar's icon.
+    _, no_origin = person_discovery(
         "Elise", {"kind": "photo", "version": 4}, person_id="abc123"
     )
-    assert photo["entity_picture"] == "/api/hemnyckel/avatar/abc123?v=4"
+    assert "entity_picture" not in no_origin
 
     # An unknown token (a newer relay) still draws something rather than nothing.
     _, unknown = person_discovery("Elise", {"kind": "symbol", "symbol": "rocket"})
@@ -468,6 +478,32 @@ def test_a_rename_withdraws_the_old_slug_and_publishes_the_new(cfg, tmp_path):
     assert ("hemnyckel/people/claes/state", "", True) in published
     assert "homeassistant/select/hemnyckel/john-appleseed/config" in topics
     assert "hemnyckel/people/john-appleseed/state" in topics
+
+
+def test_a_photo_is_published_absolute_once_home_assistant_is_known(cfg, tmp_path):
+    """Home Assistant rejects a relative ``entity_picture``, so the bridge waits
+    for Home Assistant's origin and then publishes the photo's absolute URL."""
+    published: list = []
+    bridge, store = make_bridge(cfg, tmp_path, published)
+    add_person(store, "phone", "Elise", role="owner")
+    store.set_avatar("Elise", kind="photo")
+    person_id = store.people()[0]["id"]
+
+    def discovery() -> dict:
+        return json.loads(
+            next(p for t, p, _ in published if t.endswith("/elise/config"))
+        )
+
+    bridge.publish_all_now()
+    assert "entity_picture" not in discovery()
+
+    assert bridge.set_base_url("https://ha.example/") is True
+    assert bridge.set_base_url("https://ha.example") is False
+    published.clear()
+    bridge.publish_all_now()
+    assert discovery()["entity_picture"] == (
+        f"https://ha.example/api/hemnyckel/avatar/{person_id}?v=1"
+    )
 
 
 def test_publish_all_withdraws_a_slug_the_store_no_longer_has(cfg, tmp_path):

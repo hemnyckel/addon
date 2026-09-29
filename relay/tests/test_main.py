@@ -69,6 +69,25 @@ class FakeWs:
         raise StopAsyncIteration
 
 
+class FakeHttp:
+    """A Home Assistant REST answer, for the origin lookup."""
+
+    def __init__(self, payload: dict, status: int = 200) -> None:
+        self._payload = payload
+        self._status = status
+
+    async def get(self, url, headers=None):
+        payload, status = self._payload, self._status
+
+        class Response:
+            status_code = status
+
+            def json(self):
+                return payload
+
+        return Response()
+
+
 class FakeConnect:
     """The async context manager ``websockets.connect`` returns."""
 
@@ -106,6 +125,44 @@ def test_the_relay_state_is_republished_when_home_assistant_connects(cfg, monkey
     ]
     assert states, "Home Assistant coming up must republish the relay's facts"
     assert states[0]["ha"] is True
+
+
+def test_the_origin_is_learned_and_a_photo_republished_absolute(cfg):
+    """Home Assistant rejects a relative entity_picture, so the bridge learns
+    Home Assistant's own origin and republishes the photo against it."""
+    state = State(cfg)
+    state.store.add_invited("phone", "Elise", "owner", [], [], None, None, None,
+                            person="Elise")
+    state.store.set_avatar("Elise", kind="photo")
+    person_id = state.store.people()[0]["id"]
+    published: list = []
+    state.mqtt._publish = lambda topic, payload, retain: published.append(
+        (topic, payload, retain)
+    )
+    state.ha._http = FakeHttp({"internal_url": None, "external_url": "https://ha.example/"})
+
+    asyncio.run(state.refresh_base_url())
+
+    assert state.mqtt.base_url == "https://ha.example"
+    payload = json.loads(
+        next(p for t, p, _ in published if t.endswith("/elise/config"))
+    )
+    assert payload["entity_picture"] == (
+        f"https://ha.example/api/hemnyckel/avatar/{person_id}?v=1"
+    )
+
+
+def test_an_internal_origin_is_preferred_and_empty_means_no_picture(cfg):
+    """No origin at all is the honest case: the picture is left off."""
+    state = State(cfg)
+
+    state.ha._http = FakeHttp({"internal_url": "http://10.0.0.5:8123"})
+    asyncio.run(state.refresh_base_url())
+    assert state.mqtt.base_url == "http://10.0.0.5:8123"
+
+    state.ha._http = FakeHttp({"internal_url": None, "external_url": None})
+    asyncio.run(state.refresh_base_url())
+    assert state.mqtt.base_url == ""
 
 
 def test_payload_answers_who_when_how(cfg):

@@ -208,7 +208,8 @@ def state_document(group: dict[str, Any], *, last_seen: float | None = None,
 
 
 def person_discovery(name: str, avatar: dict[str, Any] | None = None,
-                     person_id: str | None = None) -> tuple[str, dict[str, Any]]:
+                     person_id: str | None = None,
+                     base_url: str = "") -> tuple[str, dict[str, Any]]:
     """The discovery topic and payload for one person's role ``select``.
 
     The avatar is additive and optional: a symbol becomes the tile's icon, and a
@@ -216,6 +217,11 @@ def person_discovery(name: str, avatar: dict[str, Any] | None = None,
     authenticated view (only a photo has bytes; a monogram or a symbol is drawn
     by the client from the state attributes). A plain call without an avatar
     keeps the entity exactly as it was before avatars existed.
+
+    ``base_url`` is Home Assistant's own origin (``HaClient.base_url``). Home
+    Assistant validates an MQTT ``entity_picture`` with ``cv.url``, so the view
+    path is only published prefixed with that origin; with no origin there is no
+    picture, rather than a relative URL Home Assistant would reject.
     """
     s = slug(name)
     avatar = avatar or {}
@@ -234,11 +240,12 @@ def person_discovery(name: str, avatar: dict[str, Any] | None = None,
         "icon": avatar_icon(kind, symbol),
         "device": DEVICE,
     }
-    if kind == "photo" and person_id:
+    if kind == "photo" and person_id and base_url:
         # The ``?v=`` is the avatar version, so a changed photo is a changed URL
-        # and the browser fetches it instead of a cached one.
+        # and the browser fetches it instead of a cached one. The origin must be
+        # absolute: Home Assistant rejects a relative ``entity_picture``.
         payload["entity_picture"] = (
-            f"{AVATAR_VIEW_PATH}/{person_id}?v={version}"
+            f"{base_url}{AVATAR_VIEW_PATH}/{person_id}?v={version}"
         )
     return (
         f"{DISCOVERY_PREFIX}/select/{NAMESPACE}/{s}/config",
@@ -423,10 +430,30 @@ class MqttBridge:
         self._client: mqtt.Client | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._refresh_task: asyncio.Task[None] | None = None
+        # Home Assistant's origin, learned once it is up; a photo's
+        # ``entity_picture`` must be absolute and is built from it.
+        self._base_url = ""
 
     @property
     def enabled(self) -> bool:
         return self._settings is not None
+
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    def set_base_url(self, base_url: str) -> bool:
+        """Remember Home Assistant's origin; True when it changed.
+
+        Called when Home Assistant comes up and on the quiet refresh. The caller
+        republishes the projection on a change so a photo's ``entity_picture``
+        converges from absent (HA not up yet) to the absolute view URL.
+        """
+        base_url = str(base_url or "").rstrip("/")
+        if base_url == self._base_url:
+            return False
+        self._base_url = base_url
+        return True
 
     # -- lifecycle ----------------------------------------------------------
     async def start(self) -> None:
@@ -607,7 +634,7 @@ class MqttBridge:
             self._withdraw_stale()
             return
         topic, payload = person_discovery(
-            person, group.get("avatar"), group.get("id")
+            person, group.get("avatar"), group.get("id"), self._base_url
         )
         self.publish(topic, payload)
         self.publish_person(group)
@@ -621,7 +648,8 @@ class MqttBridge:
             self.publish(topic, payload)
         for group in self._people():
             topic, payload = person_discovery(
-                str(group["name"]), group.get("avatar"), group.get("id")
+                str(group["name"]), group.get("avatar"), group.get("id"),
+                self._base_url,
             )
             self.publish(topic, payload)
             self.publish_person(group)

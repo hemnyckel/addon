@@ -374,7 +374,7 @@ class State:
         # The bridge connects to the broker before Home Assistant is up, so its
         # first retained document says "ha": false. The HA connection coming up
         # is the moment that becomes untrue, and this republishes the facts.
-        self.ha = HaClient(cfg, self.on_ha_event, on_connected=self.mqtt.publish_state)
+        self.ha = HaClient(cfg, self.on_ha_event, on_connected=self.on_ha_connected)
         self.pair_code = ""
         self.pair_expires = 0.0
         self.new_pair_code()
@@ -399,6 +399,26 @@ class State:
             "doors": len(self.cfg.doors),
             "version": __version__,
         }
+
+    async def on_ha_connected(self) -> None:
+        """Home Assistant is up: refresh the facts, then learn its origin.
+
+        Awaitable from the websocket session, so the base URL is fetched and the
+        projection republished before the session settles.
+        """
+        self.mqtt.publish_state()
+        await self.refresh_base_url()
+
+    async def refresh_base_url(self) -> None:
+        """Learn Home Assistant's origin, then republish the projection.
+
+        A photo's ``entity_picture`` must be absolute (Home Assistant rejects a
+        relative one), so the projection is only complete once Home Assistant
+        answers with its own URL. On a change the whole projection is
+        republished, so the retained discovery converges.
+        """
+        if self.mqtt.set_base_url(await self.ha.base_url()):
+            self.mqtt.publish_all_now()
 
     def cancel_live_ends(self) -> None:
         for task in list(self._live_end_tasks.values()):

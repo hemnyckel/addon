@@ -5,6 +5,7 @@ Home Assistant is briefly away.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -22,7 +23,7 @@ EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
 class HaClient:
     def __init__(self, cfg: Config, on_event: EventHandler,
-                 *, on_connected: Callable[[], None] | None = None) -> None:
+                 *, on_connected: Callable[[], Awaitable[None] | None] | None = None) -> None:
         self._cfg = cfg
         self._on_event = on_event
         self._on_connected = on_connected
@@ -61,8 +62,12 @@ class HaClient:
             _LOGGER.info("Connected to Home Assistant")
             if self._on_connected is not None:
                 # The relay now knows Home Assistant is up; anything projecting
-                # its facts (the MQTT bridge) can stop claiming it is not.
-                self._on_connected()
+                # its facts (the MQTT bridge) can stop claiming it is not. The
+                # callback may be async (it also learns Home Assistant's origin),
+                # so it is awaited when it is.
+                result = self._on_connected()
+                if inspect.isawaitable(result):
+                    await result
             await ws.send(
                 json.dumps(
                     {"id": 1, "type": "subscribe_events",
@@ -175,3 +180,37 @@ class HaClient:
         if resp.status_code != 200:
             return None
         return resp.json().get("state")
+
+    async def base_url(self) -> str:
+        """The origin a browser reaches Home Assistant at, or "".
+
+        Home Assistant validates an MQTT ``entity_picture`` with ``cv.url``, so a
+        relative path is rejected and the picture must be absolute. The origin
+        comes from Home Assistant itself (``GET /api/config``): the internal URL
+        when one is configured, else the external URL. No URL, no picture - the
+        caller then leaves ``entity_picture`` off rather than publish something
+        Home Assistant will refuse.
+        """
+        if self._http is None:
+            return ""
+        try:
+            resp = await self._http.get(
+                "/api/config",
+                headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
+            )
+        except httpx.HTTPError as err:
+            _LOGGER.warning("HA /api/config failed (%s)", err)
+            return ""
+        if resp.status_code != 200:
+            return ""
+        try:
+            body = resp.json()
+        except ValueError:
+            return ""
+        if not isinstance(body, dict):
+            return ""
+        for key in ("internal_url", "external_url"):
+            value = str(body.get(key) or "").strip().rstrip("/")
+            if value:
+                return value
+        return ""

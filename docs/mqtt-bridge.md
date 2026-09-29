@@ -104,7 +104,7 @@ Discovery payloads (relay → `homeassistant/<component>/hemnyckel/<object>/conf
  "json_attributes_topic": "hemnyckel/people/elise-hogberg/state",
  "availability_topic": "hemnyckel/relay/availability",
  "icon": "mdi:star",
- "entity_picture": "/api/hemnyckel/avatar/<id>?v=<avatar_version>",
+ "entity_picture": "<ha-origin>/api/hemnyckel/avatar/<id>?v=<avatar_version>",
  "device": {"identifiers": ["hemnyckel_relay"], "name": "Hemnyckel",
             "manufacturer": "Hemnyckel", "model": "Reläet",
             "configuration_url": "https://ljungen.hall-hogberg.se/hemnyckel/"}}
@@ -121,6 +121,14 @@ points at the Home Assistant integration's authenticated view
 changed URL. The relay mirrors each photo to `/share/hemnyckel/avatars/<id>.jpg`
 (the add-on maps `share:rw`) and the integration serves it; the bytes never travel
 over MQTT and never sit on an unauthenticated path.
+
+The view path is prefixed with **Home Assistant's own origin** (`<ha-origin>`),
+taken from `GET /api/config` (`internal_url`, else `external_url`) when Home
+Assistant connects. This is not decoration: Home Assistant validates an MQTT
+`entity_picture` with `cv.url` and **rejects a relative path**, so a photo is
+published only once that origin is known — with none, the field is left off and
+the tile falls back to the avatar's `icon` rather than carrying a URL Home
+Assistant would refuse.
 
 ## The rules the relay applies to a command
 
