@@ -20,11 +20,12 @@ from fastapi import (
     Header,
     HTTPException,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
 )
 
-from . import __version__, live
+from . import __version__, avatar, live
 from .apns import ApnsClient
 from .config import Config, Door, load_config, normalize_env
 from .events import from_ha
@@ -1268,10 +1269,125 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         _LOGGER.info("Pairing code: %s (expires in 10 min)", code)
         return {"code": code, "expires_in": _PAIR_TTL}
 
+    # -- people and their icons ---------------------------------------------
+    def person_or_404(ref: str) -> Any:
+        """Resolve a person by opaque id, or by name for compatibility."""
+        person = state.store.person(ref)
+        if person is None:
+            raise HTTPException(404, "unknown person")
+        return person
+
+    def may_edit_avatar(device: dict, person: Any) -> bool:
+        """A device may change its own person's icon; an owner, anyone's."""
+        if device.get("role") == "owner":
+            return True
+        return bool(device.get("person")) and str(device["person"]) == str(person["name"])
+
+    def avatar_body(person: Any) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "id": person["id"],
+            "name": person["name"],
+            "avatar": state.store.avatar_descriptor(person),
+        }
+
     @api.get("/people")
-    async def list_people(_: dict = Depends(require_owner)) -> dict[str, Any]:
-        """People with their devices — the Personer screen."""
-        return {"people": state.store.people()}
+    async def list_people(device: dict = Depends(require_device)) -> dict[str, Any]:
+        """People with their devices and icons — the Personer screen.
+
+        Any paired device may read the icons; a guest still sees no family, the
+        same way ``/state`` shows them none. The full row (devices included) is
+        for an owner; everyone else gets just the identity and the icon.
+        """
+        if device.get("role") == "guest":
+            return {"people": []}
+        people = state.store.people()
+        if device.get("role") != "owner":
+            people = [
+                {"id": p["id"], "name": p["name"], "role": p["role"], "avatar": p["avatar"]}
+                for p in people
+            ]
+        return {"people": people}
+
+    @api.get("/people/{person}/avatar")
+    async def get_person_avatar(person: str, request: Request,
+                                _: dict = Depends(require_device)) -> Response:
+        """A person's photo, with the avatar version as its entity tag.
+
+        Only a photo has bytes; a monogram or a symbol is drawn by the client,
+        so anything but a photo is a 404. ``If-None-Match`` is honoured, so a
+        client that already has this version gets a 304 and no body.
+        """
+        row = person_or_404(person)
+        if str(row["avatar_kind"]) != "photo":
+            raise HTTPException(404, "this person has no photo")
+        try:
+            with open(state.store.avatar_file(row), "rb") as fh:
+                data = fh.read()
+        except OSError:
+            raise HTTPException(404, "this person has no photo") from None
+        version = int(row["avatar_version"])
+        etag = avatar.avatar_etag(version)
+        if avatar.matches_etag(request.headers.get("if-none-match"), version):
+            return Response(status_code=304, headers={"ETag": etag})
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"ETag": etag, "Cache-Control": "no-cache"})
+
+    @api.put("/people/{person}/avatar")
+    async def set_person_avatar(person: str, payload: dict[str, Any],
+                                device: dict = Depends(require_device)) -> dict[str, Any]:
+        """Choose a monogram or a symbol (a photo has its own upload call)."""
+        row = person_or_404(person)
+        if not may_edit_avatar(device, row):
+            raise HTTPException(403, "you may only change your own icon")
+        kind = str(payload.get("kind") or "")
+        name = str(row["name"])
+        if kind == "monogram":
+            state.store.set_avatar(name, kind="monogram")
+        elif kind == "symbol":
+            symbol = payload.get("symbol")
+            if not avatar.valid_symbol(symbol):
+                raise HTTPException(400, "unknown symbol")
+            try:
+                color = avatar.normalize_color(payload.get("color"))
+            except ValueError as err:
+                raise HTTPException(400, str(err)) from None
+            state.store.set_avatar(name, kind="symbol", symbol=str(symbol), color=color)
+        elif kind == "photo":
+            raise HTTPException(400, "upload a photo with POST .../avatar/photo")
+        else:
+            raise HTTPException(400, "kind must be monogram, symbol or photo")
+        state.mqtt.refresh(name)
+        return avatar_body(state.store.person_by_name(name))
+
+    @api.post("/people/{person}/avatar/photo")
+    async def set_person_avatar_photo(person: str, request: Request,
+                                      device: dict = Depends(require_device)) -> dict[str, Any]:
+        """Store a person's JPEG photo (never larger than 512 KB)."""
+        row = person_or_404(person)
+        if not may_edit_avatar(device, row):
+            raise HTTPException(403, "you may only change your own icon")
+        data = await request.body()
+        if len(data) > avatar.MAX_PHOTO_BYTES:
+            raise HTTPException(413, "the photo is larger than 512 KB")
+        if not avatar.is_jpeg(data):
+            raise HTTPException(415, "the photo must be a JPEG")
+        name = str(row["name"])
+        state.store.set_avatar_photo(name, data)
+        state.mqtt.refresh(name)
+        return avatar_body(state.store.person_by_name(name))
+
+    @api.delete("/people/{person}/avatar")
+    async def clear_person_avatar(person: str,
+                                  device: dict = Depends(require_device)) -> dict[str, Any]:
+        """Back to the monogram, and delete the photo."""
+        row = person_or_404(person)
+        if not may_edit_avatar(device, row):
+            raise HTTPException(403, "you may only change your own icon")
+        name = str(row["name"])
+        state.store.clear_avatar(name)
+        state.mqtt.refresh(name)
+        return avatar_body(state.store.person_by_name(name))
 
     @api.post("/people/{person}/role")
     async def set_person_role(person: str, payload: dict[str, Any],

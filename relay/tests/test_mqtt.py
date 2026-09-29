@@ -81,7 +81,12 @@ def test_the_person_state_document_matches_the_design():
 
     assert document == {
         "person": "Elise Högberg",
+        # The identity and icon are additive, and default honestly when the
+        # caller hands us a plain group (as a hand-built test might).
+        "id": None,
         "role": "user",
+        "avatar_kind": "monogram",
+        "avatar_version": 0,
         "active": True,
         "devices": [{
             "id": "8f2c", "name": "iPhone 13", "model": "iPhone 13",
@@ -89,6 +94,20 @@ def test_the_person_state_document_matches_the_design():
         }],
     }
     assert "doors" not in document and "window" not in document and "expires" not in document
+
+
+def test_a_person_state_carries_their_identity_and_avatar():
+    group = {
+        "name": "Elise", "role": "user", "id": "abc123",
+        "avatar": {"kind": "symbol", "symbol": "star", "color": "#FF9500", "version": 3},
+        "devices": [],
+    }
+
+    document = state_document(group)
+
+    assert document["id"] == "abc123"
+    assert document["avatar_kind"] == "symbol"
+    assert document["avatar_version"] == 3
 
 
 def test_a_guest_state_carries_the_window_and_expiry():

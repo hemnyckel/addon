@@ -1,11 +1,13 @@
 """Small SQLite store: paired devices, APNs tokens and a bounded event cache."""
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import sqlite3
 import time
+import uuid
 from typing import Any
 
 _LOGGER = logging.getLogger("hemnyckel.store")
@@ -71,6 +73,10 @@ _GUEST_SLOTS_KEY = "guest_slots"
 class Store:
     def __init__(self, data_dir: str) -> None:
         os.makedirs(data_dir, exist_ok=True)
+        # A person's photo lives beside the database, in the add-on's /data, so
+        # it survives an update and travels in a Home Assistant snapshot.
+        self._avatars_dir = os.path.join(data_dir, "avatars")
+        os.makedirs(self._avatars_dir, exist_ok=True)
         # All access happens on the event-loop thread (the API is fully async),
         # but allow other threads so the relay can be driven from tests/tools.
         self._db = sqlite3.connect(
@@ -143,6 +149,21 @@ class Store:
                 door_open INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+            -- A person's stable identity, separate from the display name. The
+            -- name is authoritative for display; the opaque id is what the
+            -- avatar and its photo file hang off, so a rename never detaches
+            -- an icon. A row is minted for every name and pruned with the last
+            -- device that carried it.
+            CREATE TABLE IF NOT EXISTS people (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                avatar_kind TEXT NOT NULL DEFAULT 'monogram'
+                    CHECK (avatar_kind IN ('monogram', 'symbol', 'photo')),
+                avatar_symbol TEXT,
+                avatar_color TEXT,
+                avatar_version INTEGER NOT NULL DEFAULT 0,
+                avatar_updated REAL
+            );
             """
         )
         # Migration for databases created before apns_env existed.
@@ -192,7 +213,19 @@ class Store:
         ):
             if column not in invite_columns:
                 self._db.execute(ddl)
+        # Backfill an identity for every name the relay already knows, so an
+        # install that predates avatars gets ids without losing its people.
+        self._migrate_people()
         self._db.commit()
+
+    def _migrate_people(self) -> None:
+        """Give every existing person name a stable id (idempotent)."""
+        for table in ("devices", "presence"):
+            for row in self._db.execute(
+                f"SELECT DISTINCT person FROM {table} "
+                "WHERE person IS NOT NULL AND person != ''"
+            ):
+                self._ensure_person(str(row["person"]))
 
     # -- devices ------------------------------------------------------------
     def add_device(self, device_id: str, name: str, role: str = "user") -> None:
@@ -226,6 +259,92 @@ class Store:
                 "WHERE person IS NOT NULL AND person != '' ORDER BY person"
             )
         ]
+
+    # -- identity: the person behind the name -------------------------------
+    def _ensure_person(self, name: str) -> None:
+        """Mint an identity for a name, if it does not have one yet.
+
+        Idempotent (``INSERT OR IGNORE`` on the unique name), so it is safe to
+        call from every path that introduces or learns a person name.
+        """
+        if not name:
+            return
+        self._db.execute(
+            "INSERT OR IGNORE INTO people (id, name) VALUES (?, ?)",
+            (uuid.uuid4().hex, name),
+        )
+
+    def person(self, ref: str) -> sqlite3.Row | None:
+        """A person row by opaque id, else by display name (compatibility)."""
+        row = self._db.execute("SELECT * FROM people WHERE id = ?", (ref,)).fetchone()
+        if row is None:
+            row = self._db.execute("SELECT * FROM people WHERE name = ?", (ref,)).fetchone()
+        return row
+
+    def person_by_name(self, name: str) -> sqlite3.Row | None:
+        return self._db.execute("SELECT * FROM people WHERE name = ?", (name,)).fetchone()
+
+    def avatar_descriptor(self, person: sqlite3.Row | None) -> dict[str, Any]:
+        """The avatar as clients read it; a person without one is a monogram."""
+        if person is None:
+            return {"kind": "monogram", "symbol": None, "color": None, "version": 0}
+        return {
+            "kind": str(person["avatar_kind"]),
+            "symbol": person["avatar_symbol"],
+            "color": person["avatar_color"],
+            "version": int(person["avatar_version"]),
+        }
+
+    def avatar_file(self, person: sqlite3.Row) -> str:
+        """Where this person's photo lives; the id, never the name, names it."""
+        return os.path.join(self._avatars_dir, f"{person['id']}.jpg")
+
+    def _remove_avatar_file(self, person_id: str) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(os.path.join(self._avatars_dir, f"{person_id}.jpg"))
+
+    def set_avatar(self, name: str, *, kind: str, symbol: str | None = None,
+                   color: str | None = None) -> int:
+        """Set an avatar and bump its version, returning the new version.
+
+        Only a photo needs the stored kind alone; any other kind drops the
+        photo file, so no orphan bytes are kept behind a monogram or a symbol.
+        """
+        self._ensure_person(name)
+        existing = self.person_by_name(name)
+        if kind != "photo" and existing is not None:
+            self._remove_avatar_file(str(existing["id"]))
+        self._db.execute(
+            "UPDATE people SET avatar_kind = ?, avatar_symbol = ?, avatar_color = ?, "
+            "avatar_version = avatar_version + 1, avatar_updated = ? WHERE name = ?",
+            (kind, symbol if kind == "symbol" else None,
+             color if kind == "symbol" else None, time.time(), name),
+        )
+        self._db.commit()
+        row = self.person_by_name(name)
+        return int(row["avatar_version"])
+
+    def set_avatar_photo(self, name: str, data: bytes) -> int:
+        """Store a JPEG photo for a person and mark the avatar a photo.
+
+        The bytes land at ``/data/avatars/<id>.jpg`` first, written through a
+        temporary file so a reader never sees a half-written image; the row is
+        updated only once the file is in place.
+        """
+        self._ensure_person(name)
+        person = self.person_by_name(name)
+        if person is None:  # pragma: no cover - _ensure_person guarantees one
+            raise ValueError(f"unknown person {name!r}")
+        path = self.avatar_file(person)
+        tmp = f"{path}.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+        return self.set_avatar(name, kind="photo")
+
+    def clear_avatar(self, name: str) -> int:
+        """Back to the monogram, and away with the photo file."""
+        return self.set_avatar(name, kind="monogram")
 
     def set_role(self, device_id: str, role: str) -> None:
         self._db.execute("UPDATE devices SET role = ? WHERE id = ?", (role, device_id))
@@ -308,10 +427,19 @@ class Store:
                 "device_os": row["device_os"],
                 "created": row["created"],
             })
+        people = [self._with_identity(group) for group in groups.values()]
         return sorted(
-            groups.values(),
+            people,
             key=lambda group: (not group["name"], group["name"] or group["devices"][0]["name"]),
         )
+
+    def _with_identity(self, group: dict[str, Any]) -> dict[str, Any]:
+        """Attach the stable id and avatar to a person group (name stays king)."""
+        name = str(group.get("name") or "")
+        person = self.person_by_name(name) if name else None
+        group["id"] = person["id"] if person is not None else None
+        group["avatar"] = self.avatar_descriptor(person)
+        return group
 
     # -- guest life: the person's own code slots -----------------------------
     def _all_guest_slots(self) -> dict[str, dict[str, int]]:
@@ -372,10 +500,25 @@ class Store:
         self._db.commit()
 
     def rename_person(self, old: str, new: str) -> None:
-        """A person is their name: every row that carried it carries the new one."""
+        """A person is their name: every row that carried it carries the new one.
+
+        The identity moves with the name — the id (and so the avatar and its
+        photo) is untouched — so a rename never detaches an icon.
+        """
         self._db.execute("UPDATE devices SET person = ? WHERE person = ?", (new, old))
         self._db.execute("UPDATE presence SET person = ? WHERE person = ?", (new, old))
         self._db.execute("UPDATE invites SET name = ? WHERE name = ?", (new, old))
+        moved = self.person_by_name(old)
+        taken = self.person_by_name(new)
+        if moved is not None and taken is None:
+            self._db.execute("UPDATE people SET name = ? WHERE id = ?", (new, moved["id"]))
+        elif moved is not None and taken is not None and moved["id"] != taken["id"]:
+            # A merge onto a name that already has an identity: keep the
+            # established row and drop the other one, photo included.
+            self._remove_avatar_file(str(moved["id"]))
+            self._db.execute("DELETE FROM people WHERE id = ?", (moved["id"],))
+        elif moved is None:
+            self._ensure_person(new)
         self._db.commit()
 
     def other_device_count(self, person: str, device_id: str) -> int:
@@ -399,6 +542,8 @@ class Store:
         The person may be unknown: a family member sets their own name once their
         phone is paired.
         """
+        if person:
+            self._ensure_person(person)
         self._db.execute(
             "INSERT OR REPLACE INTO devices "
             "(id, name, person, role, doors, days, from_time, to_time, expires, created) "
@@ -470,6 +615,19 @@ class Store:
                  prefs: dict[str, Any], env: str = "production") -> None:
         # An empty person never wipes a known one (an invitation may have named
         # this person already).
+        row = self.device(device_id)
+        old = str(row["person"]) if row is not None and row["person"] else ""
+        new = str(person or "")
+        if new and new != old:
+            # A rename is the *same* device row carrying a new name. When this
+            # was the old name's last device and the new name is fresh, the
+            # identity moves with it, so the avatar never detaches. Otherwise a
+            # genuinely new person is minted.
+            if old and not self.other_device_count(old, device_id) \
+                    and self.person_by_name(new) is None:
+                self.rename_person(old, new)
+            else:
+                self._ensure_person(new)
         self._db.execute(
             "UPDATE devices SET apns_token = ?, "
             "person = COALESCE(NULLIF(?, ''), person), prefs = ?, apns_env = ? WHERE id = ?",
@@ -495,7 +653,26 @@ class Store:
         return list(self._db.execute("SELECT * FROM devices"))
 
     def remove_device(self, device_id: str) -> None:
+        row = self.device(device_id)
         self._db.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+        self._db.commit()
+        if row is not None and row["person"]:
+            self._prune_person(str(row["person"]))
+
+    def _prune_person(self, name: str) -> None:
+        """A person goes with their last device: identity and photo together."""
+        if not name:
+            return
+        count = self._db.execute(
+            "SELECT COUNT(*) AS c FROM devices WHERE person = ?", (name,)
+        ).fetchone()
+        if int(count["c"]) > 0:
+            return
+        person = self.person_by_name(name)
+        if person is None:
+            return
+        self._remove_avatar_file(str(person["id"]))
+        self._db.execute("DELETE FROM people WHERE id = ?", (person["id"],))
         self._db.commit()
 
     # -- live activities ----------------------------------------------------
@@ -675,6 +852,9 @@ class Store:
         does not erase when the person was last actually at home.
         """
         now = time.time()
+        # Every presence name is a person: keeping the identity in step here
+        # means a rename can never find a presence row with no people row.
+        self._ensure_person(person)
         self._db.execute(
             "INSERT INTO presence (person, state, updated, last_home) VALUES (?, ?, ?, ?) "
             "ON CONFLICT(person) DO UPDATE SET state = excluded.state, "

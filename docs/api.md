@@ -223,6 +223,54 @@ lock could not be reached (their old code is not left behind silently), and
 (`POST /people/<person>/role`, `POST /devices/<id>/role`) already accept only
 `owner` and `user`.
 
+### Person icons (avatars)
+
+Every person has an icon, the way Apple does it: an **initials monogram** (the
+default, drawn by the client, nothing stored), a chosen **symbol + colour**, or a
+**photo** from Photos. Icons hang off a **stable, opaque person id** that never
+changes when the name does, so renaming a person never detaches their icon. The
+name stays authoritative for display; `id` is only an identity.
+
+An owner may change anyone's icon; any other paired device may change **its own**
+person's icon. Any paired device may read the icons, but a guest still sees no
+family (their `GET /people` is empty), exactly as `/state` does.
+
+```
+GET /people                       # any paired device
+  -> 200 { "people": [ { "id": "8f2c…", "name": "Elise", "role": "user",
+                         "avatar": { "kind": "symbol", "symbol": "star",
+                                     "color": "#FF9500", "version": 3 } } ] }
+                          # an owner's rows also carry "devices" and the guest life
+
+PUT /people/<id>/avatar           # <id> may be the opaque id or the name
+  { "kind": "monogram" }
+  { "kind": "symbol", "symbol": "star", "color": "#FF9500" }   # color may be null
+  -> 200 { "ok": true, "id": "8f2c…", "name": "Elise", "avatar": { … } }
+  -> 400 unknown symbol, a colour that is not #RRGGBB, or kind "photo" (use POST)
+  -> 403 someone else's icon without the owner role
+
+POST /people/<id>/avatar/photo    # raw image/jpeg body, at most 512 KB
+  -> 200 { "ok": true, "id": "8f2c…", "name": "Elise",
+           "avatar": { "kind": "photo", … } }
+  -> 413 the photo is larger than 512 KB
+  -> 415 the body is not a JPEG
+
+GET /people/<id>/avatar           # any paired device
+  -> 200 image/jpeg, ETag: "<avatar_version>"
+  -> 304 when If-None-Match already has that version
+  -> 404 when the icon is a monogram or a symbol (the client draws those)
+
+DELETE /people/<id>/avatar        # back to the monogram; the photo is deleted
+  -> 200 { "ok": true, "avatar": { "kind": "monogram", … } }
+```
+
+`avatar_version` starts at 0 and is bumped on **every** change, and is the avatar's
+`ETag`. The symbol vocabulary is shared by every client:
+`pawprint star heart bolt leaf moon sun house key car bike music book game flower
+tree wave camera plane cup` — anything else is refused. The photo lives only at
+`/data/avatars/<person_id>.jpg`, so it survives an update, travels in the add-on's
+snapshot, and is deleted with the person.
+
 ## Slots & codes (owner only)
 
 The lock's slots are where attribution comes from: a **named slot** is what turns

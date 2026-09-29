@@ -122,12 +122,23 @@ def state_document(group: dict[str, Any], *, last_seen: float | None = None,
     ``expires`` only mean something for a guest and are omitted otherwise.
     ``last_seen`` is the person's last attributed activity; the store keeps no
     per-device clock, so it is shown on each of their devices.
+
+    ``id``, ``avatar_kind`` and ``avatar_version`` are additive: the stable
+    identity and the icon, so Home Assistant can show a person's picture.
     """
     moment = time.time() if now is None else now
     role = str(group.get("role") or "user")
+    # The avatar fields ride along additively: a follow-up gives the Home
+    # Assistant entity an ``entity_picture`` from them. ``id`` is the stable
+    # identity, and ``avatar_version`` changes on every icon change so a
+    # consumer can tell a stale picture from a current one.
+    avatar = group.get("avatar") or {}
     document: dict[str, Any] = {
         "person": group.get("name"),
+        "id": group.get("id"),
         "role": role,
+        "avatar_kind": avatar.get("kind") or "monogram",
+        "avatar_version": avatar.get("version") or 0,
         "active": not _guest_expired(group, moment),
         "devices": [
             {

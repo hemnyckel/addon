@@ -139,6 +139,20 @@ Revoking the guest device — or refusing an expired guest — revokes those cod
 best-effort, so an unreachable lock never fails the revocation. A guest who
 *does* install the app redeems the invitation code exactly as before.
 
+## Person icons
+
+Every person has an icon. It is either an **initials monogram** (the default,
+drawn by the app), a **symbol + colour** from a fixed shared vocabulary, or a
+**photo** the person chose. Icons hang off a stable, opaque **person id** that
+does not change when the name does, so renaming someone never detaches their
+icon. An owner may change anyone's icon; any other paired device may change its
+own person's; any paired device may read them. A photo (a JPEG, at most 512 KB)
+is kept at `/data/avatars/<person_id>.jpg`, so it survives an update, is in the
+add-on's snapshot, and is deleted with the person. The relay never logs or
+serves photo bytes to anything but the paired devices.
+
+See [`docs/api.md`](../docs/api.md) for the endpoints.
+
 ## Roles from Home Assistant
 
 The relay also projects the family into Home Assistant over MQTT: a `select` per

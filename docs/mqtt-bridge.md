@@ -53,10 +53,13 @@ A person's state document:
 ```json
 {
   "person": "Elise Högberg",
+  "id": "8f2c9a1b3d4e5f60718293a4b5c6d7e8",
   "role": "user",
+  "avatar_kind": "symbol",
+  "avatar_version": 3,
   "active": true,
   "devices": [
-    {"id": "8f2c…", "name": "iPhone 13", "model": "iPhone 13", "os": "18.7",
+    {"id": "0a1b…", "name": "iPhone 13", "model": "iPhone 13", "os": "18.7",
      "role": "user", "last_seen": 1790618400}
   ],
   "doors": ["front"],
@@ -65,6 +68,10 @@ A person's state document:
 }
 ```
 
+`id` is the person's stable identity, and `avatar_kind` / `avatar_version` are their
+icon — additive fields a follow-up uses to give the Home Assistant entity an
+`entity_picture` (`avatar_version` changes on every icon change, so a stale picture
+is detectable). The photo bytes never cross the bridge; only the kind and version do.
 `doors`, `window` and `expires` only mean something for a guest; they are omitted otherwise.
 A guest also carries `guest_configured`: `true` when the guest really has a life (doors, hours
 or an end date), and `false` when the role is `guest` but none of them is set. A false value
@@ -169,8 +176,10 @@ on a host whose Supervisor hands an app nothing.
   `MQTT_*` environment, or the Supervisor's registered MQTT service — and only if neither
   exists does it use the explicit `mqtt_*` options. If no source has them it logs once and
   stays off rather than falling back to anonymous.
-- **What never crosses the bridge:** lock codes, device tokens, the APNs key, invite codes.
-  Only names, roles, device metadata (name, model, OS, last seen) and the relay's own health.
+- **What never crosses the bridge:** lock codes, device tokens, the APNs key, invite codes,
+  and the avatar **photo bytes**. Only names, roles, the person's opaque id and icon
+  descriptor (kind, symbol, colour, version), device metadata (name, model, OS, last seen)
+  and the relay's own health.
 - The Home Assistant side is guarded by Home Assistant's own authentication: changing a role
   from there needs an account that may use the MQTT integration.
 
