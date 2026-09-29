@@ -41,14 +41,22 @@ attribute an app-initiated lock/unlock to them.
 ## Events
 
 ```
-GET /events?since=<epoch>&door=<id>&person=<id>&limit=<n>
-  -> 200 { "events": [Event, ...] }      # newest last
+GET /events?since=<epoch>&before=<epoch>&door=<id>&person=<id>&limit=<n>
+  -> 200 { "events": [Event, ...] }      # the newest <limit>, oldest first
 GET /ws                                  # live Event stream (WebSocket)
 ```
 
 Apps and widgets read history from here. The relay also keeps a bounded local
 cache, so the app still shows the last events when Home Assistant is briefly
 unavailable.
+
+The window is taken from the **newest** end: when the journal holds more events
+than `limit`, the newest are returned and the oldest are dropped, so the latest
+event is always included however long the journal has grown. The result is
+sorted oldest first for display. `since` is inclusive (`ts >= since`); `before`
+is the cursor for paging older history (`ts < before`). The default `limit` is
+`2000`, the journal's own retention bound, so one call without a limit returns
+everything the relay keeps.
 
 ## State
 
@@ -379,13 +387,17 @@ POST /settings/home       # owner only, set once for the whole family
 ## Health
 
 ```
-GET /health      -> { "status": "ok", "ha": true, "apns": true, "version": "..." }
+GET /health      -> { "status": "ok", "ha": true, "apns": true, "version": "...",
+                      "last_event_at": <epoch|null>, "events": <count> }
 GET /api/health  -> the same
 ```
 
 The root path stays open for probes; `apns` is true only when a real key is
-loaded. The same facts are also published, retained, for Home Assistant's MQTT
-bridge (see [`mqtt-bridge.md`](mqtt-bridge.md)).
+loaded. `last_event_at` is the newest event's timestamp (the journal's pulse,
+`null` on an empty journal) and `events` is how many the relay holds, so "is the
+journal still receiving?" is answerable from outside. The same facts are also
+published, retained, for Home Assistant's MQTT bridge (see
+[`mqtt-bridge.md`](mqtt-bridge.md)).
 
 ## Event object
 

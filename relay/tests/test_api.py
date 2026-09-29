@@ -943,3 +943,41 @@ def test_editing_a_guest_is_guarded_and_validated(cfg):
         # A rename onto another person's name is refused, not merged.
         assert client.post("/api/people/Stad/guest", headers=owner,
                            json=edit_body("Bo")).status_code == 409
+
+
+def _event(i: int) -> dict:
+    return {
+        "id": f"e{i}", "ts": float(i), "door": "front", "person": "claes",
+        "slot": 1, "action": "unlock", "source": "keypad",
+        "method": "Kod", "door_open": None,
+    }
+
+
+def test_the_events_endpoint_returns_the_newest_window(cfg):
+    """The app reads history in one call; it must end at the latest event."""
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        hmk.store.add_device("dev1", "Claes' iPhone")
+        auth = {"Authorization": "Bearer dev1"}
+        for i in range(5):
+            hmk.store.add_event(_event(i))
+
+        body = client.get("/api/events?limit=2", headers=auth).json()
+
+        assert [e["id"] for e in body["events"]] == ["e3", "e4"]  # newest, ascending
+
+
+def test_health_carries_the_journal_pulse(cfg):
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        empty = client.get("/health").json()
+        assert empty["last_event_at"] is None
+        assert empty["events"] == 0
+
+        hmk.store.add_event(_event(1700000000))
+
+        body = client.get("/health").json()
+        assert body["last_event_at"] == 1700000000.0
+        assert body["events"] == 1

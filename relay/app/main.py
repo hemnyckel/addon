@@ -31,7 +31,7 @@ from .config import Config, Door, load_config, normalize_env
 from .events import from_ha
 from .ha import HaClient
 from .mqtt import MqttBridge
-from .store import Store
+from .store import EVENTS_MAX, Store
 
 _LOGGER = logging.getLogger("hemnyckel")
 
@@ -391,13 +391,21 @@ class State:
         self._pair_attempts: dict[str, list[float]] = {}
 
     def health(self) -> dict[str, Any]:
-        """The relay's facts, shared by ``/health`` and the MQTT bridge."""
+        """The relay's facts, shared by ``/health`` and the MQTT bridge.
+
+        ``last_event_at`` is the journal's pulse - the newest event's timestamp
+        (None on an empty journal) - and ``events`` is how much it holds. They
+        make "is the journal still receiving?" answerable from outside, and
+        watchable in Home Assistant through the bridge.
+        """
         return {
             "status": "ok",
             "ha": self.ha.connected,
             "apns": self.apns.live,
             "doors": len(self.cfg.doors),
             "version": __version__,
+            "last_event_at": self.store.last_event_at(),
+            "events": self.store.event_count(),
         }
 
     async def on_ha_connected(self) -> None:
@@ -453,6 +461,9 @@ class State:
             self._track_unlock(mapped)
             previous = self.store.last_event(mapped["door"])
             self.store.add_event(mapped)
+            # The journal's pulse moved: publish it now, so Home Assistant sees
+            # the journal is receiving without waiting for the quiet timer.
+            self.mqtt.publish_state()
             # A new last_seen is a change to the person's state (rule 6).
             if mapped.get("person"):
                 self.mqtt.refresh(mapped["person"])
@@ -1209,12 +1220,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @api.get("/events")
     async def events(device: dict = Depends(require_device), since: float | None = None,
-                     door: str | None = None, person: str | None = None,
-                     limit: int = 200) -> dict[str, Any]:
+                     before: float | None = None, door: str | None = None,
+                     person: str | None = None, limit: int = EVENTS_MAX) -> dict[str, Any]:
         # A guest sees no history at all.
         if device.get("role") == "guest":
             return {"events": []}
-        return {"events": state.store.events(since=since, door=door, person=person, limit=limit)}
+        return {"events": state.store.events(
+            since=since, before=before, door=door, person=person, limit=limit
+        )}
 
     @api.get("/state")
     async def door_states(device: dict = Depends(require_device)) -> dict[str, Any]:

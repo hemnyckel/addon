@@ -125,6 +125,73 @@ def test_events_are_bounded_and_queryable(tmp_path):
     assert store.last_event("back") is None
 
 
+def test_events_keep_the_newest_and_drop_the_oldest(tmp_path):
+    """The regression: a full window must never hide the latest event.
+
+    Once the journal outgrew the default limit, the old ascending query
+    returned the *oldest* window and history silently stopped updating.
+    """
+    store = Store(str(tmp_path))
+    for i in range(5):
+        store.add_event(event(i))
+
+    window = store.events(limit=3)
+
+    assert [e["id"] for e in window] == ["e2", "e3", "e4"]  # newest kept
+
+
+def test_events_are_returned_ascending_from_the_newest_end(tmp_path):
+    store = Store(str(tmp_path))
+    for i in (4, 0, 2, 1, 3):  # inserted out of order on purpose
+        store.add_event(event(i))
+
+    window = store.events(limit=3)
+
+    # The newest three (ts 2, 3, 4), handed back oldest first for display.
+    assert [e["ts"] for e in window] == [2.0, 3.0, 4.0]
+
+
+def test_events_limit_one_is_the_newest(tmp_path):
+    store = Store(str(tmp_path))
+    for i in range(5):
+        store.add_event(event(i))
+
+    assert [e["id"] for e in store.events(limit=1)] == ["e4"]
+
+
+def test_events_since_filters_inclusively_at_the_newest_end(tmp_path):
+    store = Store(str(tmp_path))
+    for i in range(5):
+        store.add_event(event(i))
+
+    assert [e["id"] for e in store.events(since=2.0)] == ["e2", "e3", "e4"]
+    # Since matches more rows than the limit: the newest survive.
+    assert [e["id"] for e in store.events(since=0.0, limit=2)] == ["e3", "e4"]
+
+
+def test_events_before_is_the_cursor_for_older_history(tmp_path):
+    store = Store(str(tmp_path))
+    for i in range(5):
+        store.add_event(event(i))
+
+    # Everything strictly older than ts 3, newest first, then ascending.
+    assert [e["id"] for e in store.events(before=3.0, limit=2)] == ["e1", "e2"]
+    assert [e["id"] for e in store.events(before=2.0)] == ["e0", "e1"]
+
+
+def test_the_journal_pulse_is_the_newest_event(tmp_path):
+    store = Store(str(tmp_path))
+    assert store.last_event_at() is None
+    assert store.event_count() == 0
+
+    store.add_event(event(7))
+    store.add_event(event(9))
+    store.add_event(event(8))
+
+    assert store.last_event_at() == 9.0
+    assert store.event_count() == 3
+
+
 def test_live_activity_tracking(tmp_path):
     store = Store(str(tmp_path))
     store.add_device("d1", "iPhone")

@@ -127,6 +127,24 @@ def test_the_relay_state_is_republished_when_home_assistant_connects(cfg, monkey
     assert states[0]["ha"] is True
 
 
+def test_the_relay_state_document_carries_the_journal_pulse(cfg):
+    """Home Assistant can watch "is the journal still receiving?" over MQTT."""
+    state = State(cfg)
+    published: list = []
+    state.mqtt._publish = lambda topic, payload, retain: published.append(
+        (topic, payload, retain)
+    )
+
+    state.store.add_event(UNLOCK)
+    state.mqtt.publish_state()
+
+    document = json.loads(next(
+        payload for topic, payload, _ in published if topic == "hemnyckel/relay/state"
+    ))
+    assert document["last_event_at"] == UNLOCK["ts"]
+    assert document["events"] == 1
+
+
 def test_the_origin_is_learned_and_a_photo_republished_absolute(cfg):
     """Home Assistant rejects a relative entity_picture, so the bridge learns
     Home Assistant's own origin and republishes the photo against it."""

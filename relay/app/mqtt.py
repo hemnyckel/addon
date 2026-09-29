@@ -256,9 +256,10 @@ def person_discovery(name: str, avatar: dict[str, Any] | None = None,
 def relay_discovery() -> list[tuple[str, dict[str, Any]]]:
     """The discovery topics and payloads for the relay's own entities.
 
-    A sensor (state ``ok``, with ``ha``/``apns``/``doors``/``version`` as
-    attributes) and a connectivity binary_sensor for whether push is
-    configured - the thing to glance at the day the Apple key lands.
+    A sensor (state ``ok``, with ``ha``/``apns``/``doors``/``version``, plus
+    ``last_event_at`` and ``events`` for the journal's pulse, as attributes) and
+    a connectivity binary_sensor for whether push is configured - the thing to
+    glance at the day the Apple key lands.
     """
     return [
         (
@@ -423,7 +424,8 @@ class MqttBridge:
         self._store = store
         self._facts = facts or (
             lambda: {"status": "ok", "ha": False, "apns": False,
-                     "doors": len(getattr(cfg, "doors", []) or []), "version": version}
+                     "doors": len(getattr(cfg, "doors", []) or []), "version": version,
+                     "last_event_at": None, "events": 0}
         )
         self._settings = settings if settings is not None else load_settings()
         self._publish = publish

@@ -23,6 +23,12 @@ _PRESENCE_TTL = 4 * 3600
 # the hours a geofence does.
 _UNLOCK_HINT = 30 * 60
 
+# The local journal is bounded: the newest events are kept, the rest are
+# dropped. This is also the default query size, so a client that reads history
+# in one call gets the whole retained journal rather than an arbitrary window -
+# the app never has to guess which slice it is seeing.
+EVENTS_MAX = 2000
+
 
 def _row(row: sqlite3.Row) -> dict[str, Any]:
     """A row as a dict, with `door_open` normalised to a real bool or None."""
@@ -777,18 +783,35 @@ class Store:
         )
         # keep the cache bounded
         self._db.execute(
-            "DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY ts DESC LIMIT 2000)"
+            "DELETE FROM events WHERE id NOT IN "
+            f"(SELECT id FROM events ORDER BY ts DESC LIMIT {EVENTS_MAX})"
         )
         self._db.commit()
 
-    def events(self, *, since: float | None = None, door: str | None = None,
-               person: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+    def events(self, *, since: float | None = None, before: float | None = None,
+               door: str | None = None, person: str | None = None,
+               limit: int = EVENTS_MAX) -> list[dict[str, Any]]:
+        """The newest matching events, oldest first for display.
+
+        The window is taken from the *newest* end: when more rows match than
+        ``limit``, the oldest are dropped, never the newest. A client that reads
+        the journal in a single call therefore always sees the latest event -
+        the bug this replaces returned the oldest window and silently froze
+        history once the journal outgrew the default.
+
+        ``since`` is inclusive (``ts >= since``); ``before`` is the cursor for
+        paging older history (``ts < before``). The result is reversed back to
+        ascending order, which is what the app and the docs expect.
+        """
         q = "SELECT * FROM events"
         where: list[str] = []
         args: list[Any] = []
         if since is not None:
             where.append("ts >= ?")
             args.append(since)
+        if before is not None:
+            where.append("ts < ?")
+            args.append(before)
         if door:
             where.append("door = ?")
             args.append(door)
@@ -797,10 +820,25 @@ class Store:
             args.append(person)
         if where:
             q += " WHERE " + " AND ".join(where)
-        q += " ORDER BY ts ASC LIMIT ?"
+        q += " ORDER BY ts DESC LIMIT ?"
         args.append(limit)
         rows = self._db.execute(q, args).fetchall()
-        return [_row(row) for row in rows]
+        return [_row(row) for row in reversed(rows)]
+
+    def last_event_at(self) -> float | None:
+        """When the newest event arrived, or None on an empty journal.
+
+        The journal's pulse, surfaced by ``/health`` and the MQTT relay-state
+        document so "is the journal still receiving?" is answerable from
+        outside the relay.
+        """
+        row = self._db.execute("SELECT MAX(ts) AS ts FROM events").fetchone()
+        return None if row is None or row["ts"] is None else float(row["ts"])
+
+    def event_count(self) -> int:
+        """How many events the relay currently holds (its bounded cache)."""
+        row = self._db.execute("SELECT COUNT(*) AS c FROM events").fetchone()
+        return int(row["c"])
 
     def last_event(self, door: str) -> dict[str, Any] | None:
         row = self._db.execute(
