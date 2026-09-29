@@ -25,6 +25,13 @@ KINDS = ("monogram", "symbol", "photo")
 # The photo is bounded by the relay, not trusted to the client: 512 KB.
 MAX_PHOTO_BYTES = 512 * 1024
 
+# Where the photo is mirrored so the Home Assistant integration can read it from
+# the filesystem. The add-on maps ``share:rw``, so host ``/share`` is mounted at
+# ``/share``; the integration registers an authenticated view over this file, and
+# the photo bytes never sit on an unauthenticated path. The add-on's own copy
+# stays in ``/data/avatars`` (it survives an update and travels in a snapshot).
+SHARE_AVATAR_DIR = "/share/hemnyckel/avatars"
+
 _COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 

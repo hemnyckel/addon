@@ -86,6 +86,8 @@ def test_the_person_state_document_matches_the_design():
         "id": None,
         "role": "user",
         "avatar_kind": "monogram",
+        "avatar_symbol": None,
+        "avatar_color": None,
         "avatar_version": 0,
         "active": True,
         "devices": [{
@@ -107,6 +109,8 @@ def test_a_person_state_carries_their_identity_and_avatar():
 
     assert document["id"] == "abc123"
     assert document["avatar_kind"] == "symbol"
+    assert document["avatar_symbol"] == "star"
+    assert document["avatar_color"] == "#FF9500"
     assert document["avatar_version"] == 3
 
 
@@ -182,6 +186,27 @@ def test_person_discovery_matches_the_design():
     assert payload["availability_topic"] == AVAILABILITY_TOPIC
     assert payload["icon"] == "mdi:account-key"
     assert payload["device"]["identifiers"] == ["hemnyckel_relay"]
+    # No avatar (or an older relay): no picture, and the generic key icon.
+    assert "entity_picture" not in payload
+
+
+def test_person_discovery_carries_the_icon_a_tile_can_draw():
+    # A symbol maps to its Material Design glyph, so the Home Assistant tile
+    # shows the same token the app draws.
+    _, symbol = person_discovery("Elise", {"kind": "symbol", "symbol": "pawprint"})
+    assert symbol["icon"] == "mdi:paw"
+    assert "entity_picture" not in symbol
+
+    # A photo becomes an authenticated entity_picture, versioned so a changed
+    # photo is a changed URL. The bytes never cross the bridge.
+    _, photo = person_discovery(
+        "Elise", {"kind": "photo", "version": 4}, person_id="abc123"
+    )
+    assert photo["entity_picture"] == "/api/hemnyckel/avatar/abc123?v=4"
+
+    # An unknown token (a newer relay) still draws something rather than nothing.
+    _, unknown = person_discovery("Elise", {"kind": "symbol", "symbol": "rocket"})
+    assert unknown["icon"] == "mdi:account-key"
 
 
 def test_relay_discovery_matches_the_design():

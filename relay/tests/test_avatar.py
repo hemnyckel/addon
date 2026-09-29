@@ -219,6 +219,65 @@ def test_a_monogram_or_symbol_removes_the_photo_file(tmp_path):
     assert not os.path.exists(path)
 
 
+def test_a_photo_is_mirrored_into_the_share_folder(tmp_path):
+    """Home Assistant reads the photo from /share, so the bytes are mirrored."""
+    share = tmp_path / "share"
+    data = tmp_path / "data"
+    store = Store(str(data), share_dir=str(share))
+    store.add_invited("d1", "iPhone", "user", [], [], None, None, None, person="Claes")
+
+    store.set_avatar_photo("Claes", JPEG)
+
+    person_id = store.person_by_name("Claes")["id"]
+    mirrored = share / f"{person_id}.jpg"
+    assert mirrored.read_bytes() == JPEG
+    # The add-on's own copy is still in /data.
+    assert (data / "avatars" / f"{person_id}.jpg").read_bytes() == JPEG
+
+
+def test_the_share_mirror_is_removed_with_the_photo_and_the_person(tmp_path):
+    share = tmp_path / "share"
+    store = Store(str(tmp_path / "data"), share_dir=str(share))
+    store.add_invited("d1", "iPhone", "user", [], [], None, None, None, person="Claes")
+    store.set_avatar_photo("Claes", JPEG)
+    person_id = store.person_by_name("Claes")["id"]
+    mirrored = share / f"{person_id}.jpg"
+    assert mirrored.exists()
+
+    # Back to a symbol: the bytes go from both places.
+    store.set_avatar("Claes", kind="symbol", symbol="star")
+    assert not mirrored.exists()
+
+    # A photo again, then the last device leaving: the person and the mirror go.
+    store.set_avatar_photo("Claes", JPEG)
+    assert mirrored.exists()
+    store.remove_device("d1")
+    assert not mirrored.exists()
+
+
+def test_an_existing_photo_is_mirrored_when_the_share_is_mapped(tmp_path):
+    """An install that set a photo before ``share:rw`` gets a mirror at once."""
+    data = tmp_path / "data"
+    before = Store(str(data))
+    before.add_invited("d1", "iPhone", "user", [], [], None, None, None, person="Claes")
+    before.set_avatar_photo("Claes", JPEG)
+    person_id = before.person_by_name("Claes")["id"]
+
+    share = tmp_path / "share"
+    Store(str(data), share_dir=str(share))
+
+    assert (share / f"{person_id}.jpg").read_bytes() == JPEG
+
+
+def test_a_share_that_cannot_be_written_is_simply_off(tmp_path):
+    """The mirror is best-effort: a bad path never fails the app."""
+    store = Store(str(tmp_path / "data"), share_dir="/proc/hemnyckel-cannot-exist")
+    store.add_invited("d1", "iPhone", "user", [], [], None, None, None, person="Claes")
+
+    # Still stores the photo in /data, and does not raise.
+    assert store.set_avatar_photo("Claes", JPEG) == 1
+
+
 def test_migration_backfills_an_id_for_an_existing_name(tmp_path):
     db = tmp_path / "hemnyckel.db"
     con = sqlite3.connect(db)
@@ -463,4 +522,6 @@ def test_the_projection_carries_the_identity_and_avatar(cfg, tmp_path):
                                if t == "hemnyckel/people/elise/state"))
     assert document["id"] == store.person_by_name("Elise")["id"]
     assert document["avatar_kind"] == "symbol"
+    assert document["avatar_symbol"] == "heart"
+    assert document["avatar_color"] == "#FF0000"
     assert document["avatar_version"] == 1

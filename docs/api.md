@@ -267,9 +267,12 @@ DELETE /people/<id>/avatar        # back to the monogram; the photo is deleted
 `avatar_version` starts at 0 and is bumped on **every** change, and is the avatar's
 `ETag`. The symbol vocabulary is shared by every client:
 `pawprint star heart bolt leaf moon sun house key car bike music book game flower
-tree wave camera plane cup` — anything else is refused. The photo lives only at
-`/data/avatars/<person_id>.jpg`, so it survives an update, travels in the add-on's
-snapshot, and is deleted with the person.
+tree wave camera plane cup` — anything else is refused. The photo lives at
+`/data/avatars/<person_id>.jpg` — so it survives an update, travels in the add-on's
+snapshot, and is deleted with the person — and is **mirrored** to
+`/share/hemnyckel/avatars/<person_id>.jpg` so the Home Assistant integration can
+read it from the filesystem and serve it over its own authenticated view (the
+add-on maps `share:rw`).
 
 ## Slots & codes (owner only)
 

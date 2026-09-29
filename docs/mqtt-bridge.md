@@ -56,6 +56,8 @@ A person's state document:
   "id": "8f2c9a1b3d4e5f60718293a4b5c6d7e8",
   "role": "user",
   "avatar_kind": "symbol",
+  "avatar_symbol": "star",
+  "avatar_color": "#FF9500",
   "avatar_version": 3,
   "active": true,
   "devices": [
@@ -68,11 +70,13 @@ A person's state document:
 }
 ```
 
-`id` is the person's stable identity, and `avatar_kind` / `avatar_version` are their
-icon — additive fields a follow-up uses to give the Home Assistant entity an
-`entity_picture` (`avatar_version` changes on every icon change, so a stale picture
-is detectable). The photo bytes never cross the bridge; only the kind and version do.
-`doors`, `window` and `expires` only mean something for a guest; they are omitted otherwise.
+`id` is the person's stable identity, and the `avatar_*` fields are their icon —
+additive fields Home Assistant reads to give the person's entity an icon and an
+`entity_picture`. `avatar_kind` is `monogram`, `symbol` or `photo`;
+`avatar_symbol`/`avatar_color` are present only for a symbol (the shared
+twenty-token vocabulary and a `#RRGGBB`); `avatar_version` changes on every icon
+change, so a stale picture is detectable. The photo bytes never cross the bridge;
+only the descriptor does. `doors`, `window` and `expires` only mean something for a guest; they are omitted otherwise.
 A guest also carries `guest_configured`: `true` when the guest really has a life (doors, hours
 or an end date), and `false` when the role is `guest` but none of them is set. A false value
 means the relay is reading that person as *all doors, any time, for ever* — a role set from
@@ -99,7 +103,8 @@ Discovery payloads (relay → `homeassistant/<component>/hemnyckel/<object>/conf
  "value_template": "{{ value_json.role }}", "options": ["owner", "user"],
  "json_attributes_topic": "hemnyckel/people/elise-hogberg/state",
  "availability_topic": "hemnyckel/relay/availability",
- "icon": "mdi:account-key",
+ "icon": "mdi:star",
+ "entity_picture": "/api/hemnyckel/avatar/<id>?v=<avatar_version>",
  "device": {"identifiers": ["hemnyckel_relay"], "name": "Hemnyckel",
             "manufacturer": "Hemnyckel", "model": "Reläet",
             "configuration_url": "https://ljungen.hall-hogberg.se/hemnyckel/"}}
@@ -107,6 +112,15 @@ Discovery payloads (relay → `homeassistant/<component>/hemnyckel/<object>/conf
 
 `unique_id` is the person's slug, so a rename in the app updates the friendly name instead of
 creating a second entity — and an entity the family has customised keeps its customisation.
+
+The `icon` is the avatar's: a symbol's Material Design glyph (the shared token
+vocabulary), else the generic key. `entity_picture` is set **only for a photo** —
+a monogram or a symbol is drawn by the client from the state attributes — and it
+points at the Home Assistant integration's authenticated view
+(`/api/hemnyckel/avatar/<id>`), with `?v=<avatar_version>` so a changed photo is a
+changed URL. The relay mirrors each photo to `/share/hemnyckel/avatars/<id>.jpg`
+(the add-on maps `share:rw`) and the integration serves it; the bytes never travel
+over MQTT and never sit on an unauthenticated path.
 
 ## The rules the relay applies to a command
 

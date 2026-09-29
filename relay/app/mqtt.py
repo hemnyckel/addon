@@ -75,6 +75,44 @@ DEVICE = {
 # A command: hemnyckel/people/<slug>/role/set, and nothing else.
 _COMMAND_TOPIC = re.compile(r"^hemnyckel/people/([^/]+)/role/set$")
 
+# The authenticated Home Assistant view the integration registers for a person's
+# photo; the bridge points the entity's ``entity_picture`` at it. The bytes never
+# cross the bridge, and the path is guarded by Home Assistant's own auth.
+AVATAR_VIEW_PATH = "/api/hemnyckel/avatar"
+
+# The shared symbol vocabulary (relay/app/avatar.py) as the Material Design icon
+# a Home Assistant tile draws it with. A token with no entry - a newer relay -
+# falls back to the generic key rather than to nothing.
+AVATAR_ICONS = {
+    "pawprint": "mdi:paw",
+    "star": "mdi:star",
+    "heart": "mdi:heart",
+    "bolt": "mdi:lightning-bolt",
+    "leaf": "mdi:leaf",
+    "moon": "mdi:moon-waning-crescent",
+    "sun": "mdi:white-balance-sunny",
+    "house": "mdi:home",
+    "key": "mdi:key",
+    "car": "mdi:car",
+    "bike": "mdi:bike",
+    "music": "mdi:music",
+    "book": "mdi:book",
+    "game": "mdi:gamepad-variant",
+    "flower": "mdi:flower",
+    "tree": "mdi:tree",
+    "wave": "mdi:waves",
+    "camera": "mdi:camera",
+    "plane": "mdi:airplane",
+    "cup": "mdi:coffee",
+}
+
+
+def avatar_icon(kind: str, symbol: str | None) -> str:
+    """The tile icon for an avatar: a symbol's glyph, else the generic key."""
+    if kind == "symbol" and symbol in AVATAR_ICONS:
+        return AVATAR_ICONS[str(symbol)]
+    return "mdi:account-key"
+
 
 def slug(name: str) -> str:
     """A person's name as a stable, readable topic segment.
@@ -138,6 +176,8 @@ def state_document(group: dict[str, Any], *, last_seen: float | None = None,
         "id": group.get("id"),
         "role": role,
         "avatar_kind": avatar.get("kind") or "monogram",
+        "avatar_symbol": avatar.get("symbol"),
+        "avatar_color": avatar.get("color"),
         "avatar_version": avatar.get("version") or 0,
         "active": not _guest_expired(group, moment),
         "devices": [
@@ -167,23 +207,42 @@ def state_document(group: dict[str, Any], *, last_seen: float | None = None,
     return document
 
 
-def person_discovery(name: str) -> tuple[str, dict[str, Any]]:
-    """The discovery topic and payload for one person's role ``select``."""
+def person_discovery(name: str, avatar: dict[str, Any] | None = None,
+                     person_id: str | None = None) -> tuple[str, dict[str, Any]]:
+    """The discovery topic and payload for one person's role ``select``.
+
+    The avatar is additive and optional: a symbol becomes the tile's icon, and a
+    photo becomes an ``entity_picture`` pointing at the integration's
+    authenticated view (only a photo has bytes; a monogram or a symbol is drawn
+    by the client from the state attributes). A plain call without an avatar
+    keeps the entity exactly as it was before avatars existed.
+    """
     s = slug(name)
+    avatar = avatar or {}
+    kind = str(avatar.get("kind") or "monogram")
+    symbol = avatar.get("symbol")
+    version = int(avatar.get("version") or 0)
+    payload: dict[str, Any] = {
+        "name": name,
+        "unique_id": f"hemnyckel_person_{s}",
+        "state_topic": f"{NAMESPACE}/people/{s}/state",
+        "command_topic": f"{NAMESPACE}/people/{s}/role/set",
+        "value_template": "{{ value_json.role }}",
+        "options": list(ROLES),
+        "json_attributes_topic": f"{NAMESPACE}/people/{s}/state",
+        "availability_topic": AVAILABILITY_TOPIC,
+        "icon": avatar_icon(kind, symbol),
+        "device": DEVICE,
+    }
+    if kind == "photo" and person_id:
+        # The ``?v=`` is the avatar version, so a changed photo is a changed URL
+        # and the browser fetches it instead of a cached one.
+        payload["entity_picture"] = (
+            f"{AVATAR_VIEW_PATH}/{person_id}?v={version}"
+        )
     return (
         f"{DISCOVERY_PREFIX}/select/{NAMESPACE}/{s}/config",
-        {
-            "name": name,
-            "unique_id": f"hemnyckel_person_{s}",
-            "state_topic": f"{NAMESPACE}/people/{s}/state",
-            "command_topic": f"{NAMESPACE}/people/{s}/role/set",
-            "value_template": "{{ value_json.role }}",
-            "options": list(ROLES),
-            "json_attributes_topic": f"{NAMESPACE}/people/{s}/state",
-            "availability_topic": AVAILABILITY_TOPIC,
-            "icon": "mdi:account-key",
-            "device": DEVICE,
-        },
+        payload,
     )
 
 
@@ -547,7 +606,9 @@ class MqttBridge:
                 self.withdraw_person(person)
             self._withdraw_stale()
             return
-        topic, payload = person_discovery(person)
+        topic, payload = person_discovery(
+            person, group.get("avatar"), group.get("id")
+        )
         self.publish(topic, payload)
         self.publish_person(group)
         self._withdraw_stale()
@@ -559,7 +620,9 @@ class MqttBridge:
         for topic, payload in relay_discovery():
             self.publish(topic, payload)
         for group in self._people():
-            topic, payload = person_discovery(str(group["name"]))
+            topic, payload = person_discovery(
+                str(group["name"]), group.get("avatar"), group.get("id")
+            )
             self.publish(topic, payload)
             self.publish_person(group)
         # A restart must still withdraw a slug that a rename left behind, so

@@ -71,12 +71,24 @@ _GUEST_SLOTS_KEY = "guest_slots"
 
 
 class Store:
-    def __init__(self, data_dir: str) -> None:
+    def __init__(self, data_dir: str, *,
+                 share_dir: str | None = None) -> None:
         os.makedirs(data_dir, exist_ok=True)
         # A person's photo lives beside the database, in the add-on's /data, so
         # it survives an update and travels in a Home Assistant snapshot.
         self._avatars_dir = os.path.join(data_dir, "avatars")
         os.makedirs(self._avatars_dir, exist_ok=True)
+        # A second copy is mirrored into the mapped ``/share`` so Home Assistant
+        # can read it from the filesystem. The mirror is best-effort: without the
+        # mapping (or in a test) it is simply off, and the app is unaffected.
+        self._share_dir = share_dir
+        self._share_ready = False
+        if share_dir:
+            try:
+                os.makedirs(share_dir, exist_ok=True)
+                self._share_ready = True
+            except OSError:
+                _LOGGER.info("avatar share mirror off: %s", share_dir)
         # All access happens on the event-loop thread (the API is fully async),
         # but allow other threads so the relay can be driven from tests/tools.
         self._db = sqlite3.connect(
@@ -85,6 +97,9 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA busy_timeout=5000")
         self._migrate()
+        # An install that set a photo before the mirror existed gets one now, so
+        # the filesystem is never a version behind the database.
+        self._mirror_existing_avatars()
 
     def _migrate(self) -> None:
         self._db.executescript(
@@ -300,8 +315,39 @@ class Store:
         return os.path.join(self._avatars_dir, f"{person['id']}.jpg")
 
     def _remove_avatar_file(self, person_id: str) -> None:
+        """Drop a person's photo, in ``/data`` and in the ``/share`` mirror."""
         with contextlib.suppress(FileNotFoundError):
             os.remove(os.path.join(self._avatars_dir, f"{person_id}.jpg"))
+        if self._share_ready and self._share_dir:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(os.path.join(self._share_dir, f"{person_id}.jpg"))
+
+    def _write_share_avatar(self, person_id: str, data: bytes) -> None:
+        """Mirror one photo into the mapped ``/share``, written atomically."""
+        if not (self._share_ready and self._share_dir):
+            return
+        try:
+            path = os.path.join(self._share_dir, f"{person_id}.jpg")
+            tmp = f"{path}.tmp"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+        except OSError:
+            _LOGGER.info("could not mirror avatar %s into /share", person_id)
+
+    def _mirror_existing_avatars(self) -> None:
+        """Copy every stored photo into ``/share`` (idempotent)."""
+        if not self._share_ready:
+            return
+        for row in self._db.execute(
+            "SELECT id FROM people WHERE avatar_kind = 'photo'"
+        ):
+            person_id = str(row["id"])
+            try:
+                with open(os.path.join(self._avatars_dir, f"{person_id}.jpg"), "rb") as fh:
+                    self._write_share_avatar(person_id, fh.read())
+            except OSError:
+                continue
 
     def set_avatar(self, name: str, *, kind: str, symbol: str | None = None,
                    color: str | None = None) -> int:
@@ -340,6 +386,9 @@ class Store:
         with open(tmp, "wb") as fh:
             fh.write(data)
         os.replace(tmp, path)
+        # The same bytes, mirrored where the Home Assistant integration reads
+        # them. The row is marked a photo only once both copies are in place.
+        self._write_share_avatar(str(person["id"]), data)
         return self.set_avatar(name, kind="photo")
 
     def clear_avatar(self, name: str) -> int:

@@ -365,7 +365,7 @@ def _refusal_reason(response: Any) -> str:
 class State:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.store = Store(cfg.data_dir)
+        self.store = Store(cfg.data_dir, share_dir=avatar.SHARE_AVATAR_DIR)
         self.store.ensure_owner()
         self.apns = ApnsClient(cfg)
         # The MQTT bridge is a projection of what this store holds, published to

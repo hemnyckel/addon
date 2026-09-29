@@ -148,8 +148,10 @@ does not change when the name does, so renaming someone never detaches their
 icon. An owner may change anyone's icon; any other paired device may change its
 own person's; any paired device may read them. A photo (a JPEG, at most 512 KB)
 is kept at `/data/avatars/<person_id>.jpg`, so it survives an update, is in the
-add-on's snapshot, and is deleted with the person. The relay never logs or
-serves photo bytes to anything but the paired devices.
+add-on's snapshot, and is deleted with the person, and is **mirrored** to
+`/share/hemnyckel/avatars/<person_id>.jpg` (the add-on maps `share:rw`) so the
+Home Assistant integration can serve it over its own authenticated view. The relay
+never logs or serves photo bytes to anything but the paired devices.
 
 See [`docs/api.md`](../docs/api.md) for the endpoints.
 

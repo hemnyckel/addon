@@ -1,5 +1,5 @@
 name: "Hemnyckel"
-version: "0.8.0"
+version: "0.8.1"
 slug: "hemnyckel"
 description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
 url: "https://github.com/hemnyckel/addon"
@@ -27,6 +27,9 @@ ports_description:
   "8099/tcp": "Hemnyckel-reläet (appens API)"
 map:
   - data:rw
+  # A person's photo is mirrored here so the Home Assistant integration can read
+  # it from the filesystem (and serve it over its authenticated avatar view).
+  - share:rw
 options:
   ha_url: ""
   ha_token: ""
