@@ -166,7 +166,9 @@ class ApnsClient:
         topic: str | None = None,
         max_attempts: int = 3,
     ) -> PushResult:
-        apns_id = uuid.uuid4().hex
+        # Apple requires apns-id to be a canonical UUID string (8-4-4-4-12).
+        # A hyphen-less .hex value is rejected with 400 BadMessageId.
+        apns_id = str(uuid.uuid4())
         if self._client is None:
             _LOGGER.info(
                 "[dev] push %s -> %s… type=%s payload=%s",

@@ -296,7 +296,7 @@ def test_unlock_starts_a_live_activity_via_push_to_start(cfg):
 
     assert len(state.apns.sent) == 1
     send = state.apns.sent[0]
-    assert send["push_type"] == "start"
+    assert send["push_type"] == "liveactivity"
     assert send["priority"] == 10
     assert send["topic"] == live_topic(cfg)
     assert send["token"] == "start-token"
@@ -314,7 +314,7 @@ def test_unlock_updates_an_existing_activity(cfg):
     asyncio.run(state.update_live_activity(UNLOCK_EVENT))
 
     send = state.apns.sent[0]
-    assert send["push_type"] == "update"
+    assert send["push_type"] == "liveactivity"
     assert send["priority"] == 5
     assert send["token"] == "act-token"
     assert send["payload"]["aps"]["event"] == "update"
@@ -344,13 +344,14 @@ def test_lock_lingers_then_ends(cfg, monkeypatch):
         # Auto-relock still updates the card (to "Låst"), even though it never
         # notifies, and schedules the end after the shorten linger.
         await state.update_live_activity({**UNLOCK, "action": "lock", "source": "auto"})
-        assert state.apns.sent[0]["push_type"] == "update"
+        assert state.apns.sent[0]["push_type"] == "liveactivity"
         assert state.apns.sent[0]["payload"]["aps"]["content-state"]["locked"] is True
         await asyncio.sleep(0.2)  # let the linger task run
 
     asyncio.run(go())
 
-    assert [s["push_type"] for s in state.apns.sent] == ["update", "end"]
+    assert [s["push_type"] for s in state.apns.sent] == ["liveactivity", "liveactivity"]
+    assert [s["payload"]["aps"]["event"] for s in state.apns.sent] == ["update", "end"]
     assert state.store.live_activities("front") == []
 
 

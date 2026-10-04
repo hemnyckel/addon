@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 
 import httpx
 import jwt
@@ -64,7 +65,10 @@ def test_sets_topic_type_priority_and_options(cfg):
     assert headers["apns-priority"] == "10"
     assert headers["apns-expiration"] == "1700000000"
     assert headers["apns-collapse-id"] == "door-front-unlock"
-    assert headers["apns-id"]
+    # Apple requires a canonical UUID in apns-id; a hyphen-less hex value is
+    # rejected with 400 BadMessageId, so it must round-trip through uuid.UUID.
+    apns_id = headers["apns-id"]
+    assert str(uuid.UUID(apns_id)) == apns_id
 
 
 def test_topic_override(cfg):

@@ -782,7 +782,11 @@ class State:
         async def one(send: dict[str, Any]) -> None:
             async with self._send_sem:
                 result = await self.apns.send(
-                    send["token"], send["payload"], push_type=send["push_type"],
+                    # The HTTP push type of every Live Activity push is
+                    # "liveactivity"; the start/update/end distinction lives in
+                    # the payload's aps.event. Sending "update" as the header
+                    # makes APNs answer 400 InvalidPushType.
+                    send["token"], send["payload"], push_type="liveactivity",
                     priority=send["priority"], topic=topic, expiration=send["expiration"],
                 )
             if result.invalidate_token:
