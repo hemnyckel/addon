@@ -444,6 +444,10 @@ GET /energy            Authorization: Bearer <device_token>
       ],
       "updated_at": 1790… }
   -> 200 { "enabled": false, "available": false }   # the module is off
+
+POST /energy/window    Authorization: Bearer <owner_token>
+  { "minutes": 120 }                                # 15–480, else clamped
+  -> 200 { "ok": true, "minutes": 120 }
 ```
 
 `days` holds today and — once the sensor publishes them — tomorrow, each with
@@ -451,7 +455,9 @@ its quarter-hour `slots` (for a chart) and its own `cheapest` window: the run of
 `window_minutes` with the smallest sum, ties to the earliest. `ahead` is the
 cheapest window that has not started yet, which is what the morning briefing
 plans around. All timestamps are epoch seconds, matching the Live Activity
-content-state.
+content-state. `window_minutes` is a **household** setting (`POST
+/energy/window`, owner only), so every phone's chart, the briefing and the Live
+Activity all agree; the add-on's `energy_window_minutes` is only the default.
 
 Two pushes carry it. A **morning briefing** (once a day, at
 `energy_morning_time`) names the next cheap window; the phone words it. A **Live

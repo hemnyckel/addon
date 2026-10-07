@@ -81,6 +81,11 @@ _JOURNAL_READ_EPSILON = 1.0
 _ENERGY_INTERVAL = 60
 _ENERGY_ACTIVE_KEY = "energy_activity"
 _ENERGY_BRIEFED_KEY = "energy_briefed"
+_ENERGY_WINDOW_KEY = "energy_window_minutes"
+# The household's chosen window length is clamped to something a machine can
+# actually run in: a quarter-hour at the shortest, eight hours at the longest.
+_ENERGY_WINDOW_MIN = 15
+_ENERGY_WINDOW_MAX = 480
 
 
 def _prefs(raw: str | None) -> dict[str, Any]:
@@ -864,6 +869,19 @@ class State:
         await asyncio.gather(*(one(s) for s in sends))
 
     # -- energy: the cheapest hours of the day ------------------------------
+    def energy_window_minutes(self) -> int:
+        """The household's chosen window length, clamped to something sane.
+
+        The length lives in the store (set from the app by an owner), so every
+        phone and the scheduler agree; the add-on option is only the default.
+        """
+        stored = self.store.setting(_ENERGY_WINDOW_KEY)
+        try:
+            minutes = int(stored) if stored else self.cfg.energy_window_minutes
+        except (TypeError, ValueError):
+            minutes = self.cfg.energy_window_minutes
+        return max(_ENERGY_WINDOW_MIN, min(minutes, _ENERGY_WINDOW_MAX))
+
     async def compute_energy_plan(self) -> dict[str, Any] | None:
         """Read the price sensor from Home Assistant and compute the plan.
 
@@ -881,7 +899,7 @@ class State:
         return energy.plan(
             attributes,
             now=now,
-            window_minutes=self.cfg.energy_window_minutes,
+            window_minutes=self.energy_window_minutes(),
             divisor=self.cfg.price_divisor,
             currency=currency,
             entity=self.cfg.price_entity,
@@ -1560,6 +1578,24 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if plan is None:
             return {"enabled": True, "available": False}
         return {"enabled": True, **plan}
+
+    @api.post("/energy/window")
+    async def set_energy_window(payload: dict[str, Any],
+                                _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Set the household's cheap-window length (owner only).
+
+        The length is a household fact, not a per-phone one, so it lives in the
+        relay and the scheduler, the briefing and every phone all read the same
+        number. The next tick recomputes the plan with it.
+        """
+        try:
+            minutes = int(payload["minutes"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "minutes is required") from None
+        minutes = max(_ENERGY_WINDOW_MIN, min(minutes, _ENERGY_WINDOW_MAX))
+        state.store.set_setting(_ENERGY_WINDOW_KEY, str(minutes))
+        state._energy_plan = None  # recompute with the new length
+        return {"ok": True, "minutes": minutes}
 
     # -- people (owner only) -------------------------------------------------
     @api.post("/presence")

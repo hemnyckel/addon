@@ -1096,3 +1096,25 @@ def test_energy_plan_and_live_token_kinds(cfg):
         assert client.delete("/api/live/activity?kind=energy",
                              headers=auth).json() == {"ok": True}
         assert hmk.store.energy_activities() == []
+
+
+def test_the_energy_window_is_an_owner_setting(cfg):
+    from dataclasses import replace
+
+    app = create_app(replace(cfg, energy_enabled=True))
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        hmk.store.add_device("owner1", "Claes' iPhone", role="owner")
+        hmk.store.add_device("user1", "Elise", role="user")
+        owner = {"Authorization": "Bearer owner1"}
+        user = {"Authorization": "Bearer user1"}
+
+        assert client.post("/api/energy/window", headers=user,
+                           json={"minutes": 180}).status_code == 403
+        assert client.post("/api/energy/window", headers=owner,
+                           json={"minutes": 180}).json() == {"ok": True, "minutes": 180}
+        assert hmk.store.setting("energy_window_minutes") == "180"
+        assert hmk.energy_window_minutes() == 180
+        # A length a machine cannot run in is clamped, never obeyed blindly.
+        assert client.post("/api/energy/window", headers=owner,
+                           json={"minutes": 5}).json()["minutes"] == 15
