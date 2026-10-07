@@ -117,6 +117,7 @@ class Store:
                 apns_token TEXT,
                 apns_env TEXT NOT NULL DEFAULT 'production',
                 live_start_token TEXT,
+                live_energy_start_token TEXT,
                 role TEXT NOT NULL DEFAULT 'user',
                 doors TEXT,
                 days TEXT,
@@ -158,6 +159,13 @@ class Store:
                 started REAL NOT NULL,
                 PRIMARY KEY (device, door)
             );
+            -- At most one energy Live Activity per device: the cheapest window
+            -- of the day, not one per door.
+            CREATE TABLE IF NOT EXISTS energy_activities (
+                device TEXT PRIMARY KEY,
+                token TEXT,
+                started REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
                 ts REAL NOT NULL,
@@ -195,6 +203,8 @@ class Store:
             )
         if "live_start_token" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN live_start_token TEXT")
+        if "live_energy_start_token" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN live_energy_start_token TEXT")
         if "role" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
         if "doors" not in columns:
@@ -766,6 +776,41 @@ class Store:
     def drop_live_activity(self, device_id: str, door: str) -> None:
         self._db.execute(
             "DELETE FROM live_activities WHERE device = ? AND door = ?", (device_id, door)
+        )
+        self._db.commit()
+
+    # -- energy activities (one per device: the cheapest window) ------------
+    def set_live_energy_start_token(self, device_id: str, token: str) -> None:
+        """A device's push-to-start token for the energy Live Activity."""
+        self._db.execute(
+            "UPDATE devices SET live_energy_start_token = ? WHERE id = ?", (token, device_id)
+        )
+        self._db.commit()
+
+    def energy_activities(self) -> list[sqlite3.Row]:
+        return list(self._db.execute("SELECT * FROM energy_activities"))
+
+    def set_energy_activity(self, device_id: str, token: str) -> None:
+        """Record the per-activity update token the app reported."""
+        self._db.execute(
+            "INSERT INTO energy_activities (device, token, started) VALUES (?, ?, ?) "
+            "ON CONFLICT(device) DO UPDATE SET token = excluded.token",
+            (device_id, token, time.time()),
+        )
+        self._db.commit()
+
+    def touch_energy_start(self, device_id: str) -> None:
+        """Note that a push-to-start was sent, before the app reports a token."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO energy_activities (device, token, started) "
+            "VALUES (?, NULL, ?)",
+            (device_id, time.time()),
+        )
+        self._db.commit()
+
+    def drop_energy_activity(self, device_id: str) -> None:
+        self._db.execute(
+            "DELETE FROM energy_activities WHERE device = ?", (device_id,)
         )
         self._db.commit()
 

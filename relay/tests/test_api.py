@@ -1049,3 +1049,50 @@ def test_the_state_endpoint_carries_the_journal_ingest_truth(cfg):
 
         body = client.get("/api/state", headers=auth).json()
         assert body["last_event_at"] == 1700000000.0
+
+
+def test_energy_is_off_by_default(cfg):
+    """The public add-on runs outside Sweden: the module must stay silent."""
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        hmk.store.add_device("dev1", "iPhone")
+        auth = {"Authorization": "Bearer dev1"}
+        assert client.get("/api/energy", headers=auth).json() == {
+            "enabled": False,
+            "available": False,
+        }
+
+
+def test_energy_plan_and_live_token_kinds(cfg):
+    from dataclasses import replace
+
+    app = create_app(replace(cfg, energy_enabled=True))
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+
+        async def fake_states():
+            return [{"entity_id": "sensor.elpris",
+                     "attributes": {"today": [100.0] * 8, "currency": "SEK"}}]
+
+        hmk.ha.states = fake_states
+        hmk.store.add_device("dev1", "iPhone")
+        auth = {"Authorization": "Bearer dev1"}
+
+        body = client.get("/api/energy", headers=auth).json()
+        assert body["enabled"] is True
+        assert body["available"] is True
+        assert body["days"][0]["cheapest"]["average"] == 1.0
+
+        # The energy push-to-start token is its own column, never the door's.
+        assert client.post("/api/live/start-token", headers=auth,
+                           json={"apns_token": "s", "kind": "energy"}).json() == {"ok": True}
+        assert hmk.store.device("dev1")["live_energy_start_token"] == "s"
+        assert hmk.store.device("dev1")["live_start_token"] is None
+
+        assert client.post("/api/live/activity", headers=auth,
+                           json={"apns_token": "a", "kind": "energy"}).json() == {"ok": True}
+        assert [row["token"] for row in hmk.store.energy_activities()] == ["a"]
+        assert client.delete("/api/live/activity?kind=energy",
+                             headers=auth).json() == {"ok": True}
+        assert hmk.store.energy_activities() == []

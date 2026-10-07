@@ -1,5 +1,5 @@
 name: "Hemnyckel"
-version: "0.8.5"
+version: "0.9.0"
 slug: "hemnyckel"
 description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
 url: "https://github.com/hemnyckel/addon"
@@ -41,6 +41,16 @@ options:
   apns_topic: ""
   live_enabled: true
   live_attributes_type: "HemnyckelLockAttributes"
+  # Elpris: billigaste timmarna från en Home Assistant-prissensor. Av som
+  # standard och sensorgenerisk - det publika add-onet körs även utanför
+  # Sverige. Sätt energy_enabled: true och peka price_entity på din sensor.
+  energy_enabled: false
+  price_entity: "sensor.elpris"
+  energy_window_minutes: 120
+  energy_morning_time: "07:00"
+  price_divisor: 100
+  energy_currency: "SEK"
+  energy_attributes_type: "HemnyckelEnergyAttributes"
   # The broker. Normally the relay takes it from Home Assistant (the
   # supervisor-injected MQTT_* environment, or the Supervisor's registered
   # MQTT service); these are the manual last resort for a Supervisor that
@@ -61,6 +71,13 @@ schema:
   apns_topic: str
   live_enabled: bool
   live_attributes_type: str
+  energy_enabled: bool
+  price_entity: str
+  energy_window_minutes: int
+  energy_morning_time: str
+  price_divisor: float
+  energy_currency: str
+  energy_attributes_type: str
   mqtt_host: str
   mqtt_port: port
   mqtt_user: str

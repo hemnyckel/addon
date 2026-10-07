@@ -39,6 +39,15 @@ class Config:
     # Live Activities (Lock Screen / Dynamic Island while a door is unlocked).
     live_enabled: bool = True
     live_attributes_type: str = "HemnyckelLockAttributes"
+    # Energy: the cheapest hours from a Home Assistant price sensor. Off by
+    # default and sensor-agnostic - the public add-on runs outside Sweden too.
+    energy_enabled: bool = False
+    price_entity: str = "sensor.elpris"
+    energy_window_minutes: int = 120
+    energy_morning_time: str = "07:00"
+    price_divisor: float = 100.0
+    energy_currency: str = "SEK"
+    energy_attributes_type: str = "HemnyckelEnergyAttributes"
     data_dir: str = "/data"
     port: int = 8099
     doors: list[Door] = field(default_factory=list)
@@ -95,6 +104,20 @@ def _bool(value: str) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _float(value: str, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _int(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def load_config() -> Config:
     opts = _options_file()
     def pick(env: str, key: str, default: str = "") -> str:
@@ -132,6 +155,19 @@ def load_config() -> Config:
         live_enabled=_bool(pick("HEMNYCKEL_LIVE_ENABLED", "live_enabled", "true")),
         live_attributes_type=pick(
             "HEMNYCKEL_LIVE_ATTRIBUTES_TYPE", "live_attributes_type", "HemnyckelLockAttributes"
+        ),
+        energy_enabled=_bool(pick("HEMNYCKEL_ENERGY_ENABLED", "energy_enabled", "false")),
+        price_entity=pick("HEMNYCKEL_PRICE_ENTITY", "price_entity", "sensor.elpris"),
+        energy_window_minutes=_int(
+            pick("HEMNYCKEL_ENERGY_WINDOW_MINUTES", "energy_window_minutes", "120"), 120
+        ),
+        energy_morning_time=pick(
+            "HEMNYCKEL_ENERGY_MORNING_TIME", "energy_morning_time", "07:00"
+        ),
+        price_divisor=_float(pick("HEMNYCKEL_PRICE_DIVISOR", "price_divisor", "100"), 100.0),
+        energy_currency=pick("HEMNYCKEL_ENERGY_CURRENCY", "energy_currency", "SEK"),
+        energy_attributes_type=pick(
+            "HEMNYCKEL_ENERGY_ATTRIBUTES_TYPE", "energy_attributes_type", "HemnyckelEnergyAttributes"
         ),
         data_dir=pick("HEMNYCKEL_DATA_DIR", "data_dir", "/data"),
         port=int(pick("HEMNYCKEL_PORT", "port", "8099")),

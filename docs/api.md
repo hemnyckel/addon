@@ -113,14 +113,14 @@ Dynamic Island) in step with it. All three calls are authenticated with the
 device token:
 
 ```
-POST /live/start-token   { "apns_token": "<hex>" }
+POST /live/start-token   { "apns_token": "<hex>", "kind": "door" | "energy" }
   -> 200 { "ok": true }        # the ActivityKit push-to-start token
 
-POST /live/activity      { "door": "front", "apns_token": "<hex>" }
+POST /live/activity      { "apns_token": "<hex>", "door": "front", "kind": "door" }
   -> 200 { "ok": true }        # a running activity's per-activity token
   -> 400 unknown door
 
-DELETE /live/activity?door=front
+DELETE /live/activity?door=front&kind=door
   -> 200 { "ok": true }        # the app ended the activity
 ```
 
@@ -128,6 +128,11 @@ The relay owns the start/update/end pushes itself (topic
 `<bundle>.push-type.liveactivity`), driven by the same journal events that
 produce notifications: an unlock starts or updates, a lock (including
 auto-relock) ends.
+
+`kind` selects the activity type and defaults to `door`. Each type has its own
+push-to-start token, so a door card and the energy card never collide; the
+energy card carries no `door` and lives under `kind: "energy"` (see
+[Energy](#energy-opt-in)).
 
 ## People (owner only)
 
@@ -391,7 +396,8 @@ POST /settings/home       # owner only, set once for the whole family
 ## Health
 
 ```
-GET /health      -> { "status": "ok", "ha": true, "apns": true, "version": "...",
+GET /health      -> { "status": "ok", "ha": true, "apns": true, "energy": false,
+                      "version": "...",
                       "last_event_at": <epoch|null>, "journal_read_at": <epoch|null>,
                       "journal_ok": true, "events": <count> }
 GET /api/health  -> the same
@@ -412,6 +418,47 @@ pulse, because the events were stored and simply never readable. When the read
 path diverges the relay logs one warning naming both timestamps — once per
 divergence, not per poll. The same facts are also published, retained, for Home
 Assistant's MQTT bridge (see [`mqtt-bridge.md`](mqtt-bridge.md)).
+
+## Energy (opt-in)
+
+The relay can read one Home Assistant price sensor (a Nordpool sensor by
+default, `sensor.elpris`) and answer the family's only question: when, from now
+on, is the cheapest stretch long enough to run a machine? The module is **off by
+default** and sensor-agnostic — the public add-on runs outside Sweden too. Turn
+it on with `energy_enabled: true` and point `price_entity` at your sensor.
+
+```
+GET /energy            Authorization: Bearer <device_token>
+  -> 200 {
+      "enabled": true, "available": true,
+      "entity": "sensor.elpris", "currency": "SEK", "unit": "kr/kWh",
+      "window_minutes": 120,
+      "now": { "value": 2.08 },
+      "ahead": { "start": 1790…, "end": 1790…, "average": 1.42,
+                 "lowest": 1.39, "highest": 1.45 },
+      "days": [
+        { "date": "2026-10-07",
+          "slots": [ { "start": 1790…, "end": 1790…, "value": 2.08 }, … ],
+          "cheapest": { "start": 1790…, "end": 1790…, "average": 1.42,
+                        "lowest": 1.39, "highest": 1.45 } }
+      ],
+      "updated_at": 1790… }
+  -> 200 { "enabled": false, "available": false }   # the module is off
+```
+
+`days` holds today and — once the sensor publishes them — tomorrow, each with
+its quarter-hour `slots` (for a chart) and its own `cheapest` window: the run of
+`window_minutes` with the smallest sum, ties to the earliest. `ahead` is the
+cheapest window that has not started yet, which is what the morning briefing
+plans around. All timestamps are epoch seconds, matching the Live Activity
+content-state.
+
+Two pushes carry it. A **morning briefing** (once a day, at
+`energy_morning_time`) names the next cheap window; the phone words it. A **Live
+Activity** starts, silently, the moment a day's `cheapest` window opens, counts
+down on its own, and ends when it closes — so a 02:00 window lights the Lock
+Screen without a sound. Both honour the per-device `prefs.energy` object
+(`{ "morning": true, "live": true }`); a guest gets neither.
 
 ## Event object
 

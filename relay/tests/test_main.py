@@ -714,3 +714,51 @@ def test_a_recreated_entry_id_still_reaches_the_right_door(tmp_path, apns_key):
 
     assert state.store.last_event("back") is not None
     assert state.store.last_event("front") is None
+
+
+def test_the_energy_window_drives_a_silent_live_activity(cfg):
+    from dataclasses import replace
+
+    state = State(replace(cfg, energy_enabled=True))
+    fake = FakeApns(PushResult(ok=True, status=200))
+    state.apns = fake
+    state.store.add_device("dev1", "iPhone")
+    state.store.set_live_energy_start_token("dev1", "starttok")
+
+    record = {"date": "2026-10-07", "start": 1000, "end": 8200,
+              "average": 1.2, "lowest": 1.0}
+    asyncio.run(state._start_energy_activity(record, {"currency": "SEK"}))
+
+    assert len(fake.sent) == 1
+    sent = fake.sent[0]
+    assert sent["token"] == "starttok"
+    assert sent["push_type"] == "liveactivity"
+    assert sent["payload"]["aps"]["event"] == "start"
+    assert sent["payload"]["aps"]["attributes-type"] == "HemnyckelEnergyAttributes"
+    # No alert: a night window must light the card without making a sound.
+    assert "alert" not in sent["payload"]["aps"]
+    assert [row["device"] for row in state.store.energy_activities()] == ["dev1"]
+
+
+def test_the_energy_briefing_is_sent_once_a_day(cfg):
+    from dataclasses import replace
+
+    state = State(replace(cfg, energy_enabled=True))
+    fake = FakeApns(PushResult(ok=True, status=200))
+    state.apns = fake
+    state.store.add_device("dev1", "iPhone")
+    state.store.set_apns("dev1", DEVICE_TOKEN, "Claes", {})
+
+    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    now = midnight.timestamp() + 8 * 3600  # after the 07:00 default
+    window = {"start": now + 5 * 3600, "end": now + 7 * 3600,
+              "average": 1.2, "lowest": 1.1, "highest": 1.3}
+    plan = {"ahead": window, "currency": "SEK"}
+
+    asyncio.run(state._maybe_brief_energy(plan, now))
+    asyncio.run(state._maybe_brief_energy(plan, now))  # once a day, not twice
+
+    assert len(fake.sent) == 1
+    alert = fake.sent[0]["payload"]["aps"]["alert"]
+    assert alert["title"] == "Elpriset"
+    assert alert["body"].startswith("Billigast idag 13:00")

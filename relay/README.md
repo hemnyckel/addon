@@ -33,6 +33,13 @@ Options (Home Assistant add-on options, or environment variables):
 | `apns_topic` | Optional APNs topic override; defaults to `bundle_id` |
 | `live_enabled` | Keep a Live Activity (Lock Screen / Dynamic Island) in step with an unlocked door (default `true`) |
 | `live_attributes_type` | The iOS `ActivityAttributes` type name the start push targets (default `HemnyckelLockAttributes`) |
+| `energy_enabled` | Read a Home Assistant price sensor and send the cheapest-hours briefing + Live Activity (default `false`) |
+| `price_entity` | The price sensor to read (default `sensor.elpris`) |
+| `energy_window_minutes` | The length of the "cheap window" the relay looks for (default `120`) |
+| `energy_morning_time` | When the daily briefing is sent, local `HH:MM` (default `07:00`) |
+| `price_divisor` | Turns the sensor's unit into kr/kWh (default `100`, i.e. öre → kr) |
+| `energy_currency` | Fallback currency when the sensor carries none (default `SEK`) |
+| `energy_attributes_type` | The iOS `ActivityAttributes` type name for the energy card (default `HemnyckelEnergyAttributes`) |
 | `doors` | A list of `{id, name, lock_entity, door_sensor?, entry_id?}` |
 | `mqtt_host` / `mqtt_port` / `mqtt_user` / `mqtt_password` | The MQTT broker, only for a Supervisor that hands the add-on no broker of its own — normally Home Assistant supplies it (see *Roles from Home Assistant*) |
 
@@ -105,6 +112,17 @@ device's push-to-start token. The card's Lock/Unlock button is an App Intent tha
 talks to the relay directly. A lock updates the card to "Låst", which lingers for
 about a minute (an undo window) before the relay ends it; unlocking in that
 window cancels the end. See `../docs/api.md` for the three registration calls.
+
+## Cheapest hours (opt-in)
+
+Off by default and sensor-agnostic: set `energy_enabled: true` and point
+`price_entity` at a Home Assistant price sensor (a Nordpool `sensor.elpris` by
+default). The relay reads the day's prices, finds the cheapest contiguous window
+of `energy_window_minutes`, sends one morning briefing, and starts a **silent**
+Live Activity the moment the window opens — so the family knows when to run the
+dishwasher, even at night, when it is cheapest and nobody wants a sound. It never
+touches the door flow: the module is separate and, turned off, absent entirely.
+See [`docs/api.md`](../docs/api.md#energy-opt-in).
 
 ## Keys (slots)
 

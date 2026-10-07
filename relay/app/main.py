@@ -25,7 +25,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 
-from . import __version__, avatar, live
+from . import __version__, avatar, energy, live
 from .apns import ApnsClient
 from .config import Config, Door, load_config, normalize_env
 from .events import from_ha
@@ -76,6 +76,11 @@ _CREDENTIAL_KINDS = (("pin", "has_pin"), ("fingerprint", "has_fingerprint"), ("r
 # lands between them may make them differ by a fraction of a second. That is not
 # a divergence: the bug this watches for hid whole windows, never a second.
 _JOURNAL_READ_EPSILON = 1.0
+# The energy pulse: how often the price plan is recomputed (and a window
+# started or ended), and the settings that must survive an add-on restart.
+_ENERGY_INTERVAL = 60
+_ENERGY_ACTIVE_KEY = "energy_activity"
+_ENERGY_BRIEFED_KEY = "energy_briefed"
 
 
 def _prefs(raw: str | None) -> dict[str, Any]:
@@ -212,6 +217,57 @@ def _wants(prefs: dict[str, Any], ev: dict[str, Any]) -> bool:
     if person and person in (prefs.get("watch") or []):
         return True  # always, even in quiet hours
     return not _in_quiet(prefs, ev["ts"])
+
+
+def _minutes_now(when: float) -> int:
+    local = time.localtime(when)
+    return local.tm_hour * 60 + local.tm_min
+
+
+def _json_obj(raw: Any) -> dict[str, Any] | None:
+    """A JSON object, or None when the value is absent or malformed."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _price_attributes(states: list[dict[str, Any]], entity: str) -> dict[str, Any] | None:
+    """One entity's attributes, or None when Home Assistant does not carry it."""
+    for state in states:
+        if state.get("entity_id") == entity:
+            attributes = state.get("attributes")
+            return attributes if isinstance(attributes, dict) else {}
+    return None
+
+
+def _energy_brief_wants(device: dict[str, Any], when: float) -> bool:
+    """May this device get the daily price briefing right now?"""
+    if device["role"] == "guest":
+        return False
+    if not device["apns_token"]:
+        return False
+    prefs = _prefs(device["prefs"])
+    if prefs.get("enabled") is False:
+        return False
+    energy_prefs = prefs.get("energy") or {}
+    if energy_prefs.get("morning", True) is False:
+        return False
+    return not _in_quiet(prefs, when)
+
+
+def _energy_live_wants(device: dict[str, Any]) -> bool:
+    """May this device get the cheap-window Live Activity (always silent)?"""
+    if device["role"] == "guest":
+        return False
+    prefs = _prefs(device["prefs"])
+    if prefs.get("enabled") is False:
+        return False
+    energy_prefs = prefs.get("energy") or {}
+    return energy_prefs.get("live", True) is not False
 
 
 # -- slots: the lock's code table, resolved from Home Assistant --------------
@@ -396,6 +452,8 @@ class State:
         # Whether the journal's read path was already reported as diverging, so
         # the warning is logged once per divergence and not on every poll.
         self._journal_diverged = False
+        # The newest computed price plan, served by /api/energy between ticks.
+        self._energy_plan: dict[str, Any] | None = None
 
     def _journal_status(self) -> tuple[float | None, float | None, bool]:
         """The journal's read side: newest ingested, newest readable, and whether
@@ -447,6 +505,7 @@ class State:
             "ha": self.ha.connected,
             "apns": self.apns.live,
             "doors": len(self.cfg.doors),
+            "energy": self.cfg.energy_enabled,
             "version": __version__,
             "last_event_at": ingested,
             "journal_read_at": read_at,
@@ -768,11 +827,13 @@ class State:
             self.store.drop_live_activity(row["device"], door.id)
         await self._send_live(sends)
 
-    def _live_send(self, device_id: str, door: Door, token: str, payload: dict[str, Any],
-                   *, push_type: str, priority: int, ttl: int) -> dict[str, Any]:
+    def _live_send(self, device_id: str, door: Door | None, token: str, payload: dict[str, Any],
+                   *, push_type: str, priority: int, ttl: int,
+                   kind: str = "door") -> dict[str, Any]:
         return {
-            "device": device_id, "door": door.id, "token": token, "payload": payload,
-            "push_type": push_type, "priority": priority,
+            "device": device_id, "door": door.id if door is not None else "",
+            "token": token, "payload": payload,
+            "push_type": push_type, "priority": priority, "kind": kind,
             "expiration": int(time.time()) + ttl,
         }
 
@@ -790,12 +851,176 @@ class State:
                     priority=send["priority"], topic=topic, expiration=send["expiration"],
                 )
             if result.invalidate_token:
-                if send["push_type"] == "start":
+                if send.get("kind") == "energy":
+                    if send["push_type"] == "start":
+                        self.store.set_live_energy_start_token(send["device"], "")
+                    else:
+                        self.store.drop_energy_activity(send["device"])
+                elif send["push_type"] == "start":
                     self.store.set_live_start_token(send["device"], "")
                 else:
                     self.store.drop_live_activity(send["device"], send["door"])
 
         await asyncio.gather(*(one(s) for s in sends))
+
+    # -- energy: the cheapest hours of the day ------------------------------
+    async def compute_energy_plan(self) -> dict[str, Any] | None:
+        """Read the price sensor from Home Assistant and compute the plan.
+
+        None means the module is off, or Home Assistant carries no usable price
+        sensor - there is nothing honest to show, so the caller says so.
+        """
+        if not self.cfg.energy_enabled:
+            return None
+        states = await self.ha.states()
+        attributes = _price_attributes(states, self.cfg.price_entity)
+        if attributes is None:
+            return None
+        now = time.time()
+        currency = str(attributes.get("currency") or "").strip() or self.cfg.energy_currency
+        return energy.plan(
+            attributes,
+            now=now,
+            window_minutes=self.cfg.energy_window_minutes,
+            divisor=self.cfg.price_divisor,
+            currency=currency,
+            entity=self.cfg.price_entity,
+        )
+
+    async def run_energy(self) -> None:
+        """The price pulse: brief in the morning, run the cheap window."""
+        while True:
+            try:
+                await self._energy_tick()
+            except Exception:
+                _LOGGER.exception("energy tick failed")
+            await asyncio.sleep(_ENERGY_INTERVAL)
+
+    async def _energy_tick(self) -> None:
+        if not self.cfg.energy_enabled or not self.cfg.ha_configured:
+            return
+        plan = await self.compute_energy_plan()
+        if plan is None or not plan.get("available"):
+            return
+        self._energy_plan = plan
+        now = time.time()
+        await self._maybe_brief_energy(plan, now)
+        await self._sync_energy_activity(plan, now)
+
+    async def _maybe_brief_energy(self, plan: dict[str, Any], now: float) -> None:
+        """One briefing a day, once the morning time has passed.
+
+        The day is recorded *before* sending, in the store rather than in
+        memory, so an add-on restart at 09:00 never sends a second briefing.
+        """
+        window = plan.get("ahead")
+        if not window:
+            return
+        today = datetime.fromtimestamp(now).date().isoformat()
+        if self.store.setting(_ENERGY_BRIEFED_KEY) == today:
+            return
+        target = _parse_hhmm(self.cfg.energy_morning_time)
+        if target is None or _minutes_now(now) < target:
+            return
+        self.store.set_setting(_ENERGY_BRIEFED_KEY, today)
+        title, body = energy.briefing_text(window, now)
+        payload = energy.notification_payload(
+            title=title, body=body, window=window, currency=plan["currency"]
+        )
+        expiration = int(now) + _ALERT_TTL
+        targets = [
+            device for device in self.store.devices()
+            if _energy_brief_wants(device, now)
+        ]
+
+        async def deliver(device: Any) -> None:
+            async with self._send_sem:
+                result = await self.apns.send(
+                    device["apns_token"], payload,
+                    env=normalize_env(device["apns_env"] or self.cfg.apns_env),
+                    expiration=expiration, collapse_id="energy-briefing",
+                )
+            if result.invalidate_token:
+                self.store.disable_apns(device["id"])
+
+        await asyncio.gather(*(deliver(device) for device in targets))
+
+    async def _sync_energy_activity(self, plan: dict[str, Any], now: float) -> None:
+        """Run one Live Activity for the day's cheapest window, on time.
+
+        The record of the running window lives in the store, so a restart in the
+        middle of a window resumes it instead of starting a second one - and it
+        is always ended (or its token pruned) once the window has closed.
+        """
+        active = _json_obj(self.store.setting(_ENERGY_ACTIVE_KEY))
+        if active and now >= float(active.get("end", 0)):
+            await self._end_energy_activity(active, plan)
+            self.store.set_setting(_ENERGY_ACTIVE_KEY, "")
+            active = None
+        if active is not None:
+            return
+        for day in plan.get("days") or []:
+            window = day.get("cheapest")
+            if not window:
+                continue
+            if float(window["start"]) <= now < float(window["end"]):
+                record = {
+                    "date": day["date"],
+                    "start": window["start"],
+                    "end": window["end"],
+                    "average": window["average"],
+                    "lowest": window["lowest"],
+                }
+                self.store.set_setting(_ENERGY_ACTIVE_KEY, json.dumps(record))
+                await self._start_energy_activity(record, plan)
+                return
+
+    async def _start_energy_activity(self, record: dict[str, Any],
+                                     plan: dict[str, Any]) -> None:
+        state = energy.live_state(
+            start=record["start"], end=record["end"],
+            average=record["average"], lowest=record["lowest"],
+            currency=plan["currency"],
+        )
+        attributes = {"day": record["date"]}
+        sends: list[dict[str, Any]] = []
+        for device in self.store.devices():
+            if not _energy_live_wants(device):
+                continue
+            token = device["live_energy_start_token"]
+            if not token:
+                continue
+            sends.append(self._live_send(
+                device["id"], None, token,
+                energy.start_payload(
+                    attributes_type=self.cfg.energy_attributes_type,
+                    attributes=attributes, state=state,
+                ),
+                push_type="start", priority=10, ttl=_LIVE_TTL, kind="energy",
+            ))
+            self.store.touch_energy_start(device["id"])
+        await self._send_live(sends)
+
+    async def _end_energy_activity(self, record: dict[str, Any],
+                                   plan: dict[str, Any]) -> None:
+        state = energy.live_state(
+            start=record["start"], end=record["end"],
+            average=float(record.get("average") or 0.0),
+            lowest=float(record.get("lowest") or 0.0),
+            currency=plan["currency"],
+        )
+        rows = self.store.energy_activities()
+        sends = [
+            self._live_send(
+                row["device"], None, row["token"],
+                energy.end_payload(state=state),
+                push_type="end", priority=10, ttl=_LIVE_END_TTL, kind="energy",
+            )
+            for row in rows if row["token"]
+        ]
+        await self._send_live(sends)
+        for row in rows:
+            self.store.drop_energy_activity(row["device"])
 
     # -- actions -------------------------------------------------------------
     async def do_action(self, door_id: str, action: str,
@@ -1182,8 +1407,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         await state.apns.start()
         await state.mqtt.start()
         task = asyncio.create_task(state.ha.run())
+        energy_task = asyncio.create_task(state.run_energy()) if cfg.energy_enabled else None
         yield
         task.cancel()
+        if energy_task is not None:
+            energy_task.cancel()
         state.cancel_live_ends()
         await state.mqtt.stop()
         await state.apns.stop()
@@ -1315,6 +1543,23 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "last_event_at": state.store.last_event_at(),
             "relay": {"online": True, "apns": state.apns.live},
         }
+
+    # -- energy: the cheapest hours (opt-in module) -------------------------
+    @api.get("/energy")
+    async def energy_plan(device: dict = Depends(require_device)) -> dict[str, Any]:
+        """Today's curve and the cheapest window, plus the next one ahead.
+
+        The plan the pulse already computed is served as-is; a device that
+        arrives before the first tick gets one computed on the spot. ``enabled``
+        tells the app whether the module is on at all.
+        """
+        if not cfg.energy_enabled:
+            return {"enabled": False, "available": False}
+        plan = state._energy_plan or await state.compute_energy_plan()
+        state._energy_plan = plan
+        if plan is None:
+            return {"enabled": True, "available": False}
+        return {"enabled": True, **plan}
 
     # -- people (owner only) -------------------------------------------------
     @api.post("/presence")
@@ -1808,10 +2053,19 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @api.post("/live/start-token")
     async def live_start_token(payload: dict[str, Any],
                                device: dict = Depends(require_device)) -> dict[str, Any]:
-        """The device's push-to-start token (lets the relay start an activity)."""
+        """The device's push-to-start token (lets the relay start an activity).
+
+        ``kind`` picks the activity type: a door (the default) or the energy
+        module's cheap window. Each type has its own push-to-start token, so the
+        two never collide.
+        """
         if device.get("role") == "guest":
             return {"ok": True}  # guests receive no pushes; ignore the token
-        state.store.set_live_start_token(device["id"], str(payload.get("apns_token") or ""))
+        token = str(payload.get("apns_token") or "")
+        if str(payload.get("kind") or "door") == "energy":
+            state.store.set_live_energy_start_token(device["id"], token)
+        else:
+            state.store.set_live_start_token(device["id"], token)
         return {"ok": True}
 
     @api.post("/live/activity")
@@ -1819,6 +2073,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                             device: dict = Depends(require_device)) -> dict[str, Any]:
         """The per-activity update token the app reports once an activity exists."""
         if device.get("role") == "guest":
+            return {"ok": True}
+        if str(payload.get("kind") or "door") == "energy":
+            state.store.set_energy_activity(device["id"], str(payload.get("apns_token") or ""))
             return {"ok": True}
         door_id = str(payload.get("door") or "")
         if cfg.door(door_id) is None:
@@ -1829,8 +2086,13 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"ok": True}
 
     @api.delete("/live/activity")
-    async def live_activity_end(door: str,
+    async def live_activity_end(door: str | None = None, kind: str = "door",
                                 device: dict = Depends(require_device)) -> dict[str, Any]:
+        if kind == "energy":
+            state.store.drop_energy_activity(device["id"])
+            return {"ok": True}
+        if not door:
+            raise HTTPException(400, "a door is required")
         state.store.drop_live_activity(device["id"], door)
         return {"ok": True}
 
