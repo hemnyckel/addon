@@ -566,6 +566,19 @@ class State:
             mapped = from_ha(self.cfg, event)
             if mapped is None:
                 return
+            if mapped["source"] == "hemsmart":
+                # The family's home app asked for this. Its identity is not a
+                # door event of its own — it is the missing attribution for the
+                # report the lock is already on its way to send, unattributed.
+                # Recorded before that report lands, exactly like this app's own
+                # action; the report then carries the name instead of a second
+                # notification.
+                self.note_app_action(
+                    mapped["door"], mapped["action"],
+                    {"name": "Hemsmart", "person": mapped.get("person")},
+                    method="Hemsmart",
+                )
+                return
             self._attribute(mapped)
             self._classify_auto_relock(mapped)
             self._track_unlock(mapped)
@@ -584,15 +597,21 @@ class State:
             _LOGGER.exception("failed to handle Home Assistant event")
 
     # -- attribution ----------------------------------------------------------
-    def note_app_action(self, door_id: str, action: str, device: dict[str, Any]) -> None:
+    def note_app_action(self, door_id: str, action: str, device: dict[str, Any],
+                        method: str = _APP_METHOD) -> None:
         """Remember that this device just asked for ``action`` on ``door_id``.
 
         Recorded *before* Home Assistant is called, because the lock can report
         the operation back before the service call returns.
+
+        ``method`` is how the credit will read: "App" for this app's own
+        screens, "Hemsmart" when the family's home app asked instead. Both are
+        the same kind of fact — whose phone it was — so both take the same path.
         """
         self._pending_attributions[(door_id, action)] = {
             "person": device.get("person") or None,
             "device": device.get("name"),
+            "method": method,
             "expires": time.time() + _ATTRIBUTION_TTL,
         }
 
@@ -610,7 +629,7 @@ class State:
         if pending["person"]:
             ev["person"] = pending["person"]
         ev["source"] = "app"
-        ev["method"] = _APP_METHOD
+        ev["method"] = pending.get("method") or _APP_METHOD
 
     def _classify_auto_relock(self, ev: dict[str, Any]) -> None:
         """Recognise a door's own auto-relock.
