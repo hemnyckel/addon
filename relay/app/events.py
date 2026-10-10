@@ -38,6 +38,9 @@ _SOURCE = {
     "auto": "auto",
     "zigbee": "unattributed",
     "unattributed": "unattributed",
+    # Hemsmart-hubben vet vilken telefon som bad om låsningen. Journalen gör
+    # det inte — den ser bara att låset rörde sig.
+    "hemsmart": "hemsmart",
 }
 
 
@@ -48,6 +51,7 @@ def _method_text(source: str) -> str:
         "tag": "Bricka",
         "auto": "Automatiskt",
         "unattributed": "Oattribuerad",
+        "hemsmart": "Hemsmart",
     }.get(source, source)
 
 
@@ -113,10 +117,40 @@ def from_state(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def from_hemsmart(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
+    """A lock worked *from* Hemsmart, where the Hub knows whose phone asked.
+
+    Home Assistant's journal only sees that the lock moved; the Hemsmart Hub
+    knows which paired phone asked for it and says so on the event bus. That
+    makes this source as attributed as the journal — for the times the journal
+    has nothing to say.
+    """
+    data = event.get("data") or {}
+    door = cfg.door_by_lock_entity(str(data.get("entity_id") or ""))
+    if door is None:
+        return None
+    action = str(data.get("action") or "").lower()
+    if action not in ("lock", "unlock"):
+        return None
+    return {
+        "id": uuid.uuid4().hex,
+        "ts": _to_epoch(data.get("at"), _to_epoch(event.get("time_fired"))),
+        "door": door.id,
+        "person": str(data.get("person") or "") or None,
+        "slot": None,
+        "action": action,
+        "source": "hemsmart",
+        "method": _method_text("hemsmart"),
+        "door_open": None,
+    }
+
+
 def from_ha(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
     # The integration's journal is the attributed source of truth (who / when /
     # how). Lock state changes are read live via the state endpoint, not turned
     # into events, so one physical action yields exactly one notification.
     if event.get("event_type") == "hemnyckel_door_event":
         return from_journal(cfg, event)
+    if event.get("event_type") == "hemsmart_lock":
+        return from_hemsmart(cfg, event)
     return None

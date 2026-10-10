@@ -79,6 +79,14 @@ class HaClient:
                     {"id": 2, "type": "subscribe_events", "event_type": "state_changed"}
                 )
             )
+            # Hemsmart-hubben säger vem som låste. Home Assistants journal vet
+            # det inte, för en tjänst bär ingen användare — så utan den här
+            # prenumerationen är en familjemedlems upplåsning oattribuerad.
+            await ws.send(
+                json.dumps(
+                    {"id": 3, "type": "subscribe_events", "event_type": "hemsmart_lock"}
+                )
+            )
             async for raw in ws:
                 msg = json.loads(raw)
                 if msg.get("type") != "event":
