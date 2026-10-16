@@ -98,6 +98,10 @@ _WASTE_INTERVAL = 300
 _WASTE_EVENING_TIME = "18:00"
 _WASTE_EVENING_SENT_KEY = "waste_evening_sent"
 _WASTE_MORNING_SENT_KEY = "waste_morning_sent"
+_WASTE_ACTIVE_KEY = "waste_activity"
+# The activity type the app renders; the schedule is a household fact rather
+# than a configurable module, so the name is a constant and not an option.
+_WASTE_ATTRIBUTES_TYPE = "HemnyckelWasteAttributes"
 
 
 def _prefs(raw: str | None) -> dict[str, Any]:
@@ -292,6 +296,16 @@ def _waste_wants(device: dict[str, Any], when: float) -> bool:
     if (prefs.get("waste") or {}).get("reminders", True) is False:
         return False
     return not _in_quiet(prefs, when)
+
+
+def _waste_live_wants(device: dict[str, Any]) -> bool:
+    """May this phone get the bins Live Activity (always silent)?"""
+    if device["role"] == "guest":
+        return False
+    prefs = _prefs(device["prefs"])
+    if prefs.get("enabled") is False:
+        return False
+    return (prefs.get("waste") or {}).get("live", True) is not False
 
 
 def _energy_live_wants(device: dict[str, Any]) -> bool:
@@ -1124,6 +1138,7 @@ class State:
         if morning is not None and _minutes_now(now) >= morning:
             await self._remind_waste(schedules, day=today,
                                      key=_WASTE_MORNING_SENT_KEY, evening=False, now=now)
+        await self._sync_waste_activity(schedules, now)
 
     async def _remind_waste(self, schedules: list[waste.Schedule], *, day: Any,
                             key: str, evening: bool, now: float) -> None:
@@ -1159,6 +1174,77 @@ class State:
                 self.store.disable_apns(device["id"])
 
         await asyncio.gather(*(deliver(device) for device in targets))
+
+    async def _sync_waste_activity(self, schedules: list[waste.Schedule], now: float) -> None:
+        """Run one Live Activity through the morning the bins go out.
+
+        It starts when the morning has begun and ends when the deadline has
+        passed: a countdown is worth having exactly while there is still time to
+        act on it. The record of what is running lives in the store, so a restart
+        mid-morning resumes it rather than starting a second one.
+        """
+        active = _json_obj(self.store.setting(_WASTE_ACTIVE_KEY))
+        if active and now >= float(active.get("deadline", 0)):
+            await self._end_waste_activity(active)
+            self.store.set_setting(_WASTE_ACTIVE_KEY, "")
+            active = None
+        if active is not None:
+            return
+        morning = _parse_hhmm(self.cfg.energy_morning_time)
+        if morning is None or _minutes_now(now) < morning:
+            return
+        today = datetime.fromtimestamp(now).date()
+        names = waste.due_on(schedules, today)
+        deadline = waste.deadline_at(today, self.waste_deadline())
+        if not names or now >= deadline:
+            return
+        record = {"names": names, "day": today.isoformat(), "deadline": deadline}
+        self.store.set_setting(_WASTE_ACTIVE_KEY, json.dumps(record))
+        await self._start_waste_activity(record)
+
+    async def _start_waste_activity(self, record: dict[str, Any]) -> None:
+        state = waste.live_state(
+            names=list(record.get("names") or []),
+            day=datetime.fromisoformat(str(record.get("day"))).date(),
+            deadline=float(record.get("deadline") or 0),
+        )
+        attributes = {"names": record.get("names") or []}
+        sends: list[dict[str, Any]] = []
+        for device in self.store.devices():
+            if not _waste_live_wants(device):
+                continue
+            token = device["live_waste_start_token"]
+            if not token:
+                continue
+            sends.append(self._live_send(
+                device["id"], None, token,
+                waste.start_payload(
+                    attributes_type=_WASTE_ATTRIBUTES_TYPE,
+                    attributes=attributes, state=state,
+                ),
+                push_type="start", priority=10, ttl=_LIVE_TTL, kind="waste",
+            ))
+            self.store.touch_waste_start(device["id"])
+        await self._send_live(sends)
+
+    async def _end_waste_activity(self, record: dict[str, Any]) -> None:
+        state = waste.live_state(
+            names=list(record.get("names") or []),
+            day=datetime.fromisoformat(str(record.get("day"))).date(),
+            deadline=float(record.get("deadline") or 0),
+        )
+        rows = self.store.waste_activities()
+        sends = [
+            self._live_send(
+                row["device"], None, row["token"],
+                waste.end_payload(state=state),
+                push_type="end", priority=10, ttl=_LIVE_END_TTL, kind="waste",
+            )
+            for row in rows if row["token"]
+        ]
+        await self._send_live(sends)
+        for row in rows:
+            self.store.drop_waste_activity(row["device"])
 
     # -- actions -------------------------------------------------------------
     async def do_action(self, door_id: str, action: str,
@@ -2240,15 +2326,18 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                                device: dict = Depends(require_device)) -> dict[str, Any]:
         """The device's push-to-start token (lets the relay start an activity).
 
-        ``kind`` picks the activity type: a door (the default) or the energy
-        module's cheap window. Each type has its own push-to-start token, so the
-        two never collide.
+        ``kind`` picks the activity type: a door (the default), the energy
+        module's cheap window, or the bins. Each type has its own push-to-start
+        token, so they never collide.
         """
         if device.get("role") == "guest":
             return {"ok": True}  # guests receive no pushes; ignore the token
         token = str(payload.get("apns_token") or "")
-        if str(payload.get("kind") or "door") == "energy":
+        kind = str(payload.get("kind") or "door")
+        if kind == "energy":
             state.store.set_live_energy_start_token(device["id"], token)
+        elif kind == "waste":
+            state.store.set_live_waste_start_token(device["id"], token)
         else:
             state.store.set_live_start_token(device["id"], token)
         return {"ok": True}
@@ -2259,8 +2348,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         """The per-activity update token the app reports once an activity exists."""
         if device.get("role") == "guest":
             return {"ok": True}
-        if str(payload.get("kind") or "door") == "energy":
+        kind = str(payload.get("kind") or "door")
+        if kind == "energy":
             state.store.set_energy_activity(device["id"], str(payload.get("apns_token") or ""))
+            return {"ok": True}
+        if kind == "waste":
+            state.store.set_waste_activity(device["id"], str(payload.get("apns_token") or ""))
             return {"ok": True}
         door_id = str(payload.get("door") or "")
         if cfg.door(door_id) is None:

@@ -116,3 +116,23 @@ def test_the_live_activity_state_counts_to_the_deadline():
         "day": "2026-10-22",
         "deadline": deadline,
     }
+
+
+def test_the_push_to_start_goes_stale_when_the_deadline_passes():
+    """A countdown that has run out must not claim there is time left."""
+    deadline = waste.deadline_at(THURSDAY_ODD)
+    state = waste.live_state(names=["Återvinning"], day=THURSDAY_ODD, deadline=deadline)
+    payload = waste.start_payload(
+        attributes_type="HemnyckelWasteAttributes",
+        attributes={"names": ["Återvinning"]},
+        state=state,
+        timestamp=1_800_000_000,
+    )
+    assert payload["aps"]["event"] == "start"
+    assert payload["aps"]["stale-date"] == int(deadline)
+    assert payload["aps"]["attributes-type"] == "HemnyckelWasteAttributes"
+    assert payload["aps"]["content-state"]["names"] == ["Återvinning"]
+
+    ended = waste.end_payload(state=state, timestamp=1_800_000_000)
+    assert ended["aps"]["event"] == "end"
+    assert ended["aps"]["dismissal-date"] == 1_800_000_060

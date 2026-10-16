@@ -7,6 +7,7 @@ so it can be tested without a clock or a phone.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -135,6 +136,41 @@ def live_state(*, names: list[str], day: date, deadline: float) -> dict[str, Any
     activity needs no update pushes between start and deadline.
     """
     return {"names": names, "day": day.isoformat(), "deadline": float(deadline)}
+
+
+def start_payload(*, attributes_type: str, attributes: dict[str, Any],
+                  state: dict[str, Any], timestamp: int | None = None) -> dict[str, Any]:
+    """A push-to-start, carrying the deadline as its stale-date.
+
+    The stale-date greys the card out on time even if the relay never gets to end
+    it: a countdown that has run out must not claim there is time left.
+    """
+    now = int(time.time()) if timestamp is None else timestamp
+    deadline = int(float(state.get("deadline", now)))
+    return {
+        "aps": {
+            "timestamp": now,
+            "event": "start",
+            "attributes-type": attributes_type,
+            "attributes": attributes,
+            "content-state": state,
+            "stale-date": deadline,
+            "relevance-score": 100.0,
+        }
+    }
+
+
+def end_payload(*, state: dict[str, Any], timestamp: int | None = None,
+                dismissal_after: int = 60) -> dict[str, Any]:
+    now = int(time.time()) if timestamp is None else timestamp
+    return {
+        "aps": {
+            "timestamp": now,
+            "event": "end",
+            "content-state": state,
+            "dismissal-date": now + dismissal_after,
+        }
+    }
 
 
 def snapshot(schedules: list[Schedule], now: float, deadline: str = DEFAULT_DEADLINE) -> dict[str, Any]:

@@ -118,6 +118,7 @@ class Store:
                 apns_env TEXT NOT NULL DEFAULT 'production',
                 live_start_token TEXT,
                 live_energy_start_token TEXT,
+                live_waste_start_token TEXT,
                 role TEXT NOT NULL DEFAULT 'user',
                 doors TEXT,
                 days TEXT,
@@ -166,6 +167,13 @@ class Store:
                 token TEXT,
                 started REAL NOT NULL
             );
+            -- At most one waste Live Activity per device: the morning the bins
+            -- go out, which is one event a day and not one per collection.
+            CREATE TABLE IF NOT EXISTS waste_activities (
+                device TEXT PRIMARY KEY,
+                token TEXT,
+                started REAL NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
                 ts REAL NOT NULL,
@@ -205,6 +213,8 @@ class Store:
             self._db.execute("ALTER TABLE devices ADD COLUMN live_start_token TEXT")
         if "live_energy_start_token" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN live_energy_start_token TEXT")
+        if "live_waste_start_token" not in columns:
+            self._db.execute("ALTER TABLE devices ADD COLUMN live_waste_start_token TEXT")
         if "role" not in columns:
             self._db.execute("ALTER TABLE devices ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
         if "doors" not in columns:
@@ -812,6 +822,37 @@ class Store:
         self._db.execute(
             "DELETE FROM energy_activities WHERE device = ?", (device_id,)
         )
+        self._db.commit()
+
+    def set_live_waste_start_token(self, device_id: str, token: str) -> None:
+        """A device's push-to-start token for the bins Live Activity."""
+        self._db.execute(
+            "UPDATE devices SET live_waste_start_token = ? WHERE id = ?", (token, device_id)
+        )
+        self._db.commit()
+
+    def waste_activities(self) -> list[sqlite3.Row]:
+        return list(self._db.execute("SELECT * FROM waste_activities"))
+
+    def set_waste_activity(self, device_id: str, token: str) -> None:
+        """Record the per-activity token the app reported, so it can be ended."""
+        self._db.execute(
+            "INSERT INTO waste_activities (device, token, started) VALUES (?, ?, ?) "
+            "ON CONFLICT(device) DO UPDATE SET token = excluded.token",
+            (device_id, token, time.time()),
+        )
+        self._db.commit()
+
+    def touch_waste_start(self, device_id: str) -> None:
+        """Note that a push-to-start was sent, before the app reports a token."""
+        self._db.execute(
+            "INSERT OR IGNORE INTO waste_activities (device, token, started) VALUES (?, NULL, ?)",
+            (device_id, time.time()),
+        )
+        self._db.commit()
+
+    def drop_waste_activity(self, device_id: str) -> None:
+        self._db.execute("DELETE FROM waste_activities WHERE device = ?", (device_id,))
         self._db.commit()
 
     # -- events -------------------------------------------------------------
