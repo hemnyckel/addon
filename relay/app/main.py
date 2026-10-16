@@ -25,7 +25,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 
-from . import __version__, avatar, energy, live
+from . import __version__, avatar, energy, live, waste
 from .apns import ApnsClient
 from .config import Config, Door, load_config, normalize_env
 from .events import from_ha
@@ -86,6 +86,11 @@ _ENERGY_WINDOW_KEY = "energy_window_minutes"
 # actually run in: a quarter-hour at the shortest, eight hours at the longest.
 _ENERGY_WINDOW_MIN = 15
 _ENERGY_WINDOW_MAX = 480
+# The household's collection days: a list of {name, weekday, weeks}, and the
+# morning the bins must be out by. House facts, not per-phone ones, because the
+# reminders and the Live Activity have to fire while every phone is asleep.
+_WASTE_SCHEDULES_KEY = "waste_schedules"
+_WASTE_DEADLINE_KEY = "waste_deadline"
 
 
 def _prefs(raw: str | None) -> dict[str, Any]:
@@ -901,6 +906,15 @@ class State:
             minutes = self.cfg.energy_window_minutes
         return max(_ENERGY_WINDOW_MIN, min(minutes, _ENERGY_WINDOW_MAX))
 
+    # -- waste: the household's collection days ------------------------------
+    def waste_schedules(self) -> list[waste.Schedule]:
+        """The collection days as the app configured them, broken rows dropped."""
+        return waste.parse_schedules(_json_list(self.store.setting(_WASTE_SCHEDULES_KEY)))
+
+    def waste_deadline(self) -> str:
+        """The morning the bins must be out by - the household's own, or ours."""
+        return self.store.setting(_WASTE_DEADLINE_KEY) or waste.DEFAULT_DEADLINE
+
     async def compute_energy_plan(self) -> dict[str, Any] | None:
         """Read the price sensor from Home Assistant and compute the plan.
 
@@ -1615,6 +1629,33 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         state.store.set_setting(_ENERGY_WINDOW_KEY, str(minutes))
         state._energy_plan = None  # recompute with the new length
         return {"ok": True, "minutes": minutes}
+
+    @api.get("/waste")
+    async def waste_days(device: dict = Depends(require_device)) -> dict[str, Any]:
+        """What is collected today and tomorrow, and when the next one comes.
+
+        The schedule is the household's, so every phone reads the same answer -
+        and ``enabled`` tells the app whether anything is set up at all.
+        """
+        return waste.snapshot(state.waste_schedules(), time.time(), state.waste_deadline())
+
+    @api.post("/waste/settings")
+    async def set_waste_settings(payload: dict[str, Any],
+                                 _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Set the household's collection days and the deadline (owner only).
+
+        The schedule belongs to the house, not to a phone: the reminders and the
+        Live Activity must fire while every phone is asleep, so the relay holds
+        it and the app only edits it. A malformed row is dropped rather than
+        rejected - a typo on one line must not cost the others their reminders.
+        """
+        schedules = waste.parse_schedules(payload.get("schedules"))
+        deadline = str(payload.get("deadline") or waste.DEFAULT_DEADLINE)
+        state.store.set_setting(
+            _WASTE_SCHEDULES_KEY, json.dumps(waste.schedules_to_json(schedules))
+        )
+        state.store.set_setting(_WASTE_DEADLINE_KEY, deadline)
+        return {"ok": True, **waste.snapshot(schedules, time.time(), deadline)}
 
     # -- people (owner only) -------------------------------------------------
     @api.post("/presence")
