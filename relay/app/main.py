@@ -342,28 +342,52 @@ _SENSOR_SUFFIXES = {
     "_lock_facts": ("_lock_facts", "_lasdata"),
 }
 
-# The name each carries, for the fallback below: the lock's own name and the
-# label ("Ytterdörren Slots"). Paired with the suffixes above, in the same order.
+# The entity name each slot sensor carries, for the fallback below: the lock's
+# own name and the label ("Ytterdörren Slots"). Paired with the suffixes above,
+# in the same order.
 _SENSOR_LABEL = {
     "_slots": ("Slots", "Nycklar"),
     "_lock_facts": ("Lock facts", "Låsdata"),
 }
 
 
+def _door_slug(door: Door) -> str:
+    """The slug a door's sensors are named after: its lock entity, minus domain.
+
+    "lock.kallardorren" -> "kallardorren". An entity id is minted once and never
+    changes, so this is the one part of a door's naming that survives a
+    relabelling - which is exactly what matching on a *name* does not. The
+    integration shortened "Källardörren" to "Källardörr" on its sensors, and a
+    door named the longer way round stopped finding its own keys.
+    """
+    _, _, slug = str(door.lock_entity or "").partition(".")
+    return slug
+
+
 def _slot_sensor(states: list[dict[str, Any]], door: Door,
                  suffix: str) -> dict[str, Any] | None:
-    """Find a door's sensor by the lock name it carries, then by entry id.
+    """Find a door's sensor: by its own lock entity, then by the name the lock
+    carries, then by the label, and last by the entry id.
 
-    The slots and lock-facts sensors both carry the lock's human name (the same
-    one a household sees, e.g. "Ytterdörren"). The live entry id — not the one
-    in the relay's config, which is a stale hint — is what a service call needs,
-    so it is read from the sensor itself.
+    The lock entity comes first because it is the only one of the four that cannot
+    drift: a relabelled lock, or a door renamed in the app, still leaves the
+    sensors where they were. The live entry id - not the one in the relay's
+    config, which is a stale hint - is what a service call needs, so it is read
+    from the sensor itself.
     """
     matches = [
         state for state in states
         if str(state.get("entity_id") or "").startswith("sensor.")
         and str(state.get("entity_id") or "").endswith(_SENSOR_SUFFIXES[suffix])
     ]
+    # The door's own lock entity, by slug: the one identifier that cannot drift
+    # when the integration relabels a lock or the household renames a door.
+    slug = _door_slug(door)
+    if slug:
+        wanted = f"sensor.{slug}_"
+        for state in matches:
+            if str(state.get("entity_id") or "").startswith(wanted):
+                return state
     for state in matches:
         if _attributes(state).get("lock") == door.name:
             return state

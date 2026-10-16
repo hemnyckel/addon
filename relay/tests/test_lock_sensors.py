@@ -72,3 +72,36 @@ def test_the_facts_sit_beside_the_slots_in_either_language():
         states = [slots, _state(facts_id, lock=door.name, entry_id="01ABC")]
         assert _lock_facts(states, door, slots, "") == {"lock": door.name,
                                                         "entry_id": "01ABC"}
+
+
+def test_a_door_named_differently_from_its_lock_still_finds_its_keys():
+    """The integration shortened "Källardörren" to "Källardörr" on the lock's own
+    sensors, so a door configured with the longer name lost its keys."""
+    door = Door(id="basement", name="Källardörren", lock_entity="lock.kallardorren")
+    states = [
+        _state("sensor.kallardorren_nycklar", lock="Källardörr",
+               friendly_name="Källardörr Nycklar"),
+        _state("sensor.ytterdorren_nycklar", lock="Ytterdörren"),
+    ]
+    found = _slot_sensor(states, door, "_slots")
+    assert found is not None
+    assert found["entity_id"] == "sensor.kallardorren_nycklar"
+
+
+def test_a_door_without_a_lock_entity_is_still_matched_by_its_name():
+    door = Door(id="basement", name="Källardörr", lock_entity="")
+    states = [_state("sensor.kallardorren_nycklar", lock="Källardörr")]
+    found = _slot_sensor(states, door, "_slots")
+    assert found is not None
+    assert found["entity_id"] == "sensor.kallardorren_nycklar"
+
+
+def test_the_slug_never_matches_another_locks_sensor():
+    """Matching by slug must not become a looser match than the name was."""
+    door = Door(id="basement", name="Källardörren", lock_entity="lock.kallardorren")
+    states = [
+        _state("sensor.garagedorren_nycklar", lock="Garagedörren"),
+        _state("sensor.kallardorren_nycklar", lock="Källardörr"),
+    ]
+    found = _slot_sensor(states, door, "_slots")
+    assert found is not None and found["entity_id"] == "sensor.kallardorren_nycklar"

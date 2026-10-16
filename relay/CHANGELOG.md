@@ -1,5 +1,17 @@
 # Ändringar
 
+## 0.10.5
+
+- **Lås:** reläet hittar en dörrs nycklar och låsdata även när dörren heter något
+  annat än låset. Integrationen kortade låsets etikett — sensorerna säger
+  "Källardörr" medan låset och appen säger "Källardörren" — och en dörr som var
+  konfigurerad med den längre formen tappade därför sina nycklar, inklusive
+  fingeravtrycksmappningen. Händelser fortsatte fungera, eftersom de matchas på
+  `lock_entity`; bara nycklarna försvann, vilket gjorde felet lätt att missa.
+  Matchningen går nu **först** på dörrens eget `lock_entity` — entity-id:t, som
+  skapas en gång och aldrig byts — och därefter på namn, etikett och entry-id som
+  förut. Ingen ändring behövs i konfigurationen.
+
 ## 0.10.4
 
 - **Lås:** reläet hittar en dörrs nycklar och låsdata även när sensorerna är
