@@ -6,7 +6,6 @@ from app.events import from_ha
 
 from .test_main import UNATTRIBUTED, make_state
 
-
 # What the Hub puts on Home Assistant's event bus when a phone in the family's
 # home app works a lock. It knows who; the lock's own report does not.
 HEMSMART = {
