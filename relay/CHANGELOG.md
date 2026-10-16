@@ -1,5 +1,15 @@
 # Ändringar
 
+## 0.10.4
+
+- **Lås:** reläet hittar en dörrs nycklar och låsdata även när sensorerna är
+  namngivna på svenska (`_nycklar` och `_lasdata`, i stället för `_slots` och
+  `_lock_facts`). Namnbytet skedde i integrationen, men ett entity-id skapas en
+  gång och byts aldrig — så ett äldre lås bär fortfarande de engelska namnen och
+  ett nyare de svenska. Båda läses nu.
+  Utan det fick ett nyare lås inga nycklar, och inget **live entry-id** — vilket
+  också är vad en lås-/upplåsning från appen behöver.
+
 ## 0.10.3
 
 - **Sophämtning:** kvällsnotisens klockslag och nedräkningens försprung är nu

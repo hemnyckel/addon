@@ -332,8 +332,22 @@ def _attributes(state: dict[str, Any]) -> dict[str, Any]:
     return attrs if isinstance(attrs, dict) else {}
 
 
-# The entity name each slot sensor carries, for the fallback below.
-_SENSOR_LABEL = {"_slots": "Slots", "_lock_facts": "Lock facts"}
+# The integration labels its slot and lock-facts sensors. It began in English and
+# now names them in Swedish; an entity id is minted once and never changes, so a
+# lock added after the rename carries the Swedish ones while an older lock still
+# carries the English. They are the same two sensors either way - and the English
+# ones will never appear again, so both have to be understood.
+_SENSOR_SUFFIXES = {
+    "_slots": ("_slots", "_nycklar"),
+    "_lock_facts": ("_lock_facts", "_lasdata"),
+}
+
+# The name each carries, for the fallback below: the lock's own name and the
+# label ("Ytterdörren Slots"). Paired with the suffixes above, in the same order.
+_SENSOR_LABEL = {
+    "_slots": ("Slots", "Nycklar"),
+    "_lock_facts": ("Lock facts", "Låsdata"),
+}
 
 
 def _slot_sensor(states: list[dict[str, Any]], door: Door,
@@ -348,15 +362,14 @@ def _slot_sensor(states: list[dict[str, Any]], door: Door,
     matches = [
         state for state in states
         if str(state.get("entity_id") or "").startswith("sensor.")
-        and str(state.get("entity_id") or "").endswith(suffix)
+        and str(state.get("entity_id") or "").endswith(_SENSOR_SUFFIXES[suffix])
     ]
     for state in matches:
         if _attributes(state).get("lock") == door.name:
             return state
     # The integration names the entity after the lock ("Ytterdörren Slots"), so
     # the friendly name identifies it even without an explicit lock attribute.
-    label = _SENSOR_LABEL.get(suffix)
-    if label:
+    for label in _SENSOR_LABEL.get(suffix, ()):
         wanted = f"{door.name} {label}"
         for state in matches:
             if _attributes(state).get("friendly_name") == wanted:
@@ -372,18 +385,23 @@ def _lock_facts(states: list[dict[str, Any]], door: Door,
                 slots_state: dict[str, Any], entry_id: str) -> dict[str, Any] | None:
     """The matching lock-facts attributes, if the lock has reported them."""
     entity_id = str(slots_state.get("entity_id") or "")
-    if entity_id.endswith("_slots"):
-        sibling = entity_id[: -len("_slots")] + "_lock_facts"
-        for state in states:
-            if state.get("entity_id") == sibling:
-                return _attributes(state)
+    # The suffix pairs, in step: "_slots" sits beside "_lock_facts", and the
+    # Swedish "_nycklar" beside "_lasdata".
+    for slots_suffix, facts_suffix in zip(_SENSOR_SUFFIXES["_slots"],
+                                          _SENSOR_SUFFIXES["_lock_facts"],
+                                          strict=True):
+        if entity_id.endswith(slots_suffix):
+            sibling = entity_id[: -len(slots_suffix)] + facts_suffix
+            for state in states:
+                if state.get("entity_id") == sibling:
+                    return _attributes(state)
     facts_state = _slot_sensor(states, door, "_lock_facts")
     if facts_state is None:
         # On an older sensor that carries no name: match by the entry id.
         facts_state = next(
             (state for state in states
              if str(state.get("entity_id") or "").startswith("sensor.")
-             and str(state.get("entity_id") or "").endswith("_lock_facts")
+             and str(state.get("entity_id") or "").endswith(_SENSOR_SUFFIXES["_lock_facts"])
              and entry_id
              and _attributes(state).get("entry_id") == entry_id),
             None,
