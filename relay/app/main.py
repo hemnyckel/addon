@@ -99,6 +99,12 @@ _WASTE_EVENING_TIME = "18:00"
 _WASTE_EVENING_SENT_KEY = "waste_evening_sent"
 _WASTE_MORNING_SENT_KEY = "waste_morning_sent"
 _WASTE_ACTIVE_KEY = "waste_activity"
+# The countdown may appear two hours before the deadline, and the morning
+# reminder goes out three quarters of an hour before it: both anchored to the
+# household's own deadline, so changing that moves them with it - a reminder that
+# arrives after the bins should have been out is worse than none.
+_WASTE_ACTIVITY_LEAD = 2 * 3600
+_WASTE_REMINDER_LEAD = 45 * 60
 # The activity type the app renders; the schedule is a household fact rather
 # than a configurable module, so the name is a constant and not an option.
 _WASTE_ATTRIBUTES_TYPE = "HemnyckelWasteAttributes"
@@ -1122,23 +1128,27 @@ class State:
                 _LOGGER.exception("waste tick failed")
             await asyncio.sleep(_WASTE_INTERVAL)
 
-    async def _waste_tick(self) -> None:
-        """Look at the date, and send whichever reminder is due and unsent."""
+    async def _waste_tick(self, now: float | None = None) -> None:
+        """Look at the date, and do whatever is due: a reminder, or the countdown.
+
+        ``now`` is injectable, so the whole pulse can be tested without waiting
+        for a real evening to come round.
+        """
         schedules = self.waste_schedules()
         if not schedules:
             return
-        now = time.time()
-        today = datetime.fromtimestamp(now).date()
-        tomorrow = datetime.fromtimestamp(now + 86400).date()
+        moment = time.time() if now is None else now
+        today = datetime.fromtimestamp(moment).date()
+        tomorrow = datetime.fromtimestamp(moment + 86400).date()
         evening = _parse_hhmm(_WASTE_EVENING_TIME)
-        if evening is not None and _minutes_now(now) >= evening:
+        if evening is not None and _minutes_now(moment) >= evening:
             await self._remind_waste(schedules, day=tomorrow,
-                                     key=_WASTE_EVENING_SENT_KEY, evening=True, now=now)
-        morning = _parse_hhmm(self.cfg.energy_morning_time)
-        if morning is not None and _minutes_now(now) >= morning:
+                                     key=_WASTE_EVENING_SENT_KEY, evening=True, now=moment)
+        deadline = waste.deadline_at(today, self.waste_deadline())
+        if deadline - _WASTE_REMINDER_LEAD <= moment < deadline:
             await self._remind_waste(schedules, day=today,
-                                     key=_WASTE_MORNING_SENT_KEY, evening=False, now=now)
-        await self._sync_waste_activity(schedules, now)
+                                     key=_WASTE_MORNING_SENT_KEY, evening=False, now=moment)
+        await self._sync_waste_activity(schedules, moment)
 
     async def _remind_waste(self, schedules: list[waste.Schedule], *, day: Any,
                             key: str, evening: bool, now: float) -> None:
@@ -1190,13 +1200,10 @@ class State:
             active = None
         if active is not None:
             return
-        morning = _parse_hhmm(self.cfg.energy_morning_time)
-        if morning is None or _minutes_now(now) < morning:
-            return
         today = datetime.fromtimestamp(now).date()
         names = waste.due_on(schedules, today)
         deadline = waste.deadline_at(today, self.waste_deadline())
-        if not names or now >= deadline:
+        if not names or not deadline - _WASTE_ACTIVITY_LEAD <= now < deadline:
             return
         record = {"names": names, "day": today.isoformat(), "deadline": deadline}
         self.store.set_setting(_WASTE_ACTIVE_KEY, json.dumps(record))
@@ -2368,6 +2375,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                                 device: dict = Depends(require_device)) -> dict[str, Any]:
         if kind == "energy":
             state.store.drop_energy_activity(device["id"])
+            return {"ok": True}
+        if kind == "waste":
+            state.store.drop_waste_activity(device["id"])
             return {"ok": True}
         if not door:
             raise HTTPException(400, "a door is required")
