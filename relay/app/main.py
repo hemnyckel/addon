@@ -91,6 +91,13 @@ _ENERGY_WINDOW_MAX = 480
 # reminders and the Live Activity have to fire while every phone is asleep.
 _WASTE_SCHEDULES_KEY = "waste_schedules"
 _WASTE_DEADLINE_KEY = "waste_deadline"
+# The bins pulse: how often the day is looked at, the hour the evening reminder
+# goes out, and the records that keep it to one a day. They live in the store, so
+# a restart at 19:00 never sends a second reminder.
+_WASTE_INTERVAL = 300
+_WASTE_EVENING_TIME = "18:00"
+_WASTE_EVENING_SENT_KEY = "waste_evening_sent"
+_WASTE_MORNING_SENT_KEY = "waste_morning_sent"
 
 
 def _prefs(raw: str | None) -> dict[str, Any]:
@@ -265,6 +272,24 @@ def _energy_brief_wants(device: dict[str, Any], when: float) -> bool:
         return False
     energy_prefs = prefs.get("energy") or {}
     if energy_prefs.get("morning", True) is False:
+        return False
+    return not _in_quiet(prefs, when)
+
+
+def _waste_wants(device: dict[str, Any], when: float) -> bool:
+    """May this phone be reminded about the bins right now?
+
+    The schedule is the household's; whether to be told is each phone's own
+    choice, and its own quiet hours still hold.
+    """
+    if device["role"] == "guest":
+        return False
+    if not device["apns_token"]:
+        return False
+    prefs = _prefs(device["prefs"])
+    if prefs.get("enabled") is False:
+        return False
+    if (prefs.get("waste") or {}).get("reminders", True) is False:
         return False
     return not _in_quiet(prefs, when)
 
@@ -1073,6 +1098,68 @@ class State:
         for row in rows:
             self.store.drop_energy_activity(row["device"])
 
+    # -- waste: the household's collection days ------------------------------
+    async def run_waste(self) -> None:
+        """The bins pulse: remind the evening before, and again in the morning."""
+        while True:
+            try:
+                await self._waste_tick()
+            except Exception:
+                _LOGGER.exception("waste tick failed")
+            await asyncio.sleep(_WASTE_INTERVAL)
+
+    async def _waste_tick(self) -> None:
+        """Look at the date, and send whichever reminder is due and unsent."""
+        schedules = self.waste_schedules()
+        if not schedules:
+            return
+        now = time.time()
+        today = datetime.fromtimestamp(now).date()
+        tomorrow = datetime.fromtimestamp(now + 86400).date()
+        evening = _parse_hhmm(_WASTE_EVENING_TIME)
+        if evening is not None and _minutes_now(now) >= evening:
+            await self._remind_waste(schedules, day=tomorrow,
+                                     key=_WASTE_EVENING_SENT_KEY, evening=True, now=now)
+        morning = _parse_hhmm(self.cfg.energy_morning_time)
+        if morning is not None and _minutes_now(now) >= morning:
+            await self._remind_waste(schedules, day=today,
+                                     key=_WASTE_MORNING_SENT_KEY, evening=False, now=now)
+
+    async def _remind_waste(self, schedules: list[waste.Schedule], *, day: Any,
+                            key: str, evening: bool, now: float) -> None:
+        """One reminder about one day's collection, once.
+
+        The day is recorded before sending, so a restart later the same evening
+        does not send it twice.
+        """
+        names = waste.due_on(schedules, day)
+        if not names or self.store.setting(key) == day.isoformat():
+            return
+        self.store.set_setting(key, day.isoformat())
+        if evening:
+            title, body = waste.evening_text(names, day)
+        else:
+            title, body = waste.morning_text(names, self.waste_deadline())
+        payload = waste.notification_payload(
+            title=title, body=body, names=names, day=day, evening=evening
+        )
+        expiration = int(now) + _ALERT_TTL
+        targets = [
+            device for device in self.store.devices() if _waste_wants(device, now)
+        ]
+
+        async def deliver(device: dict[str, Any]) -> None:
+            async with self._send_sem:
+                result = await self.apns.send(
+                    device["apns_token"], payload,
+                    env=normalize_env(device["apns_env"] or self.cfg.apns_env),
+                    expiration=expiration, collapse_id="waste-reminder",
+                )
+            if result.invalidate_token:
+                self.store.disable_apns(device["id"])
+
+        await asyncio.gather(*(deliver(device) for device in targets))
+
     # -- actions -------------------------------------------------------------
     async def do_action(self, door_id: str, action: str,
                         device: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1459,10 +1546,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         await state.mqtt.start()
         task = asyncio.create_task(state.ha.run())
         energy_task = asyncio.create_task(state.run_energy()) if cfg.energy_enabled else None
+        waste_task = asyncio.create_task(state.run_waste())
         yield
         task.cancel()
         if energy_task is not None:
             energy_task.cancel()
+        waste_task.cancel()
         state.cancel_live_ends()
         await state.mqtt.stop()
         await state.apns.stop()

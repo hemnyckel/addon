@@ -144,6 +144,7 @@ def snapshot(schedules: list[Schedule], now: float, deadline: str = DEFAULT_DEAD
     upcoming = next_pickup(schedules, now)
     return {
         "enabled": bool(schedules),
+        "schedules": schedules_to_json(schedules),
         "today": due_on(schedules, today),
         "tomorrow": due_on(schedules, tomorrow),
         "deadline": deadline,

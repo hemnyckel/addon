@@ -89,6 +89,9 @@ def test_the_snapshot_carries_today_tomorrow_and_what_comes_next():
     assert snapshot["tomorrow"] == []
     assert snapshot["deadline"] == "06:45"
     assert snapshot["next"] == {"day": "2026-10-22", "names": ["Återvinning"]}
+    assert snapshot["schedules"] == [
+        {"name": "Återvinning", "weekday": 3, "weeks": "odd"}
+    ], "the app edits the rows it was given, so they have to be in the answer"
     assert waste.snapshot([], evening_before)["enabled"] is False
 
 
