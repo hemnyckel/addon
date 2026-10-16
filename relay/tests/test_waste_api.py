@@ -44,6 +44,18 @@ def test_the_households_collection_days_are_set_by_an_owner(cfg):
         assert "Mat & rest" in stored
         assert "Skräp" not in stored
 
+        # The household's knobs: saved, clamped, and kept when a save omits them.
+        tuned = client.post("/api/waste/settings", headers=owner,
+                            json={"evening": "20:30", "lead_minutes": 45}).json()
+        assert tuned["evening"] == "20:30"
+        assert tuned["lead_minutes"] == 45
+        kept = client.post("/api/waste/settings", headers=owner,
+                           json={"deadline": "07:15"}).json()
+        assert kept["evening"] == "20:30", "a save that omits a knob must not reset it"
+        assert kept["lead_minutes"] == 45
+        assert kept["deadline"] == "07:15"
+        assert kept["schedules"] == [{"name": "Mat & rest", "weekday": 2, "weeks": "even"}]
+
         # Clearing the list turns the feature off rather than leaving it half set.
         cleared = client.post("/api/waste/settings", headers=owner,
                               json={"schedules": []}).json()

@@ -16,8 +16,50 @@ from typing import Any
 # and early enough to matter on the way out of the door.
 DEFAULT_DEADLINE = "06:45"
 
+# The hour the evening reminder goes out, and how long before the deadline the
+# house starts saying so. Both are the household's, set from the app.
+DEFAULT_EVENING = "18:00"
+DEFAULT_LEAD_MINUTES = 120
+
 WEEKDAYS = ("måndag", "tisdag", "onsdag", "torsdag", "fredag", "lördag", "söndag")
 PARITIES = ("every", "odd", "even")
+
+
+def clamp_lead(raw: Any, default: int = DEFAULT_LEAD_MINUTES) -> int:
+    """How long before the deadline the countdown should appear, in minutes.
+
+    Never nothing and never a whole day: a card that has been counting down since
+    yesterday says less than one that appeared this morning - and a quarter of an
+    hour is short enough to be a reminder rather than a shrug.
+    """
+    try:
+        minutes = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return min(12 * 60, max(15, minutes))
+
+
+def clean_clock(raw: Any, default: str) -> str:
+    """A "HH:MM" setting, kept as one - or the default when it is not one."""
+    text = str(raw or "").strip()
+    hour, _, minute = text.partition(":")
+    try:
+        at_hour, at_minute = int(hour), int(minute)
+    except ValueError:
+        return default
+    if not 0 <= at_hour <= 23 or not 0 <= at_minute <= 59:
+        return default
+    return f"{at_hour:02d}:{at_minute:02d}"
+
+
+def clean_evening(raw: Any, default: str = DEFAULT_EVENING) -> str:
+    """The evening reminder's hour."""
+    return clean_clock(raw, default)
+
+
+def clean_deadline(raw: Any, default: str = DEFAULT_DEADLINE) -> str:
+    """The morning the bins must be out by."""
+    return clean_clock(raw, default)
 
 
 @dataclass(frozen=True)
@@ -93,15 +135,9 @@ def deadline_at(day: date, deadline: str = DEFAULT_DEADLINE) -> float:
     A malformed setting falls back to the default rather than taking a build
     down with it.
     """
-    hour, _, minute = str(deadline).partition(":")
-    try:
-        at_hour, at_minute = int(hour), int(minute)
-    except ValueError:
-        at_hour, at_minute = 6, 45
+    at_hour, at_minute = (int(part) for part in clean_clock(deadline, DEFAULT_DEADLINE).split(":"))
     moment = datetime.combine(day, datetime.min.time())
-    return moment.replace(
-        hour=min(23, max(0, at_hour)), minute=min(59, max(0, at_minute))
-    ).timestamp()
+    return moment.replace(hour=at_hour, minute=at_minute).timestamp()
 
 
 def evening_text(names: list[str], day: date) -> tuple[str, str]:
@@ -173,8 +209,10 @@ def end_payload(*, state: dict[str, Any], timestamp: int | None = None,
     }
 
 
-def snapshot(schedules: list[Schedule], now: float, deadline: str = DEFAULT_DEADLINE) -> dict[str, Any]:
-    """What the app reads: today, tomorrow, and the next collection."""
+def snapshot(schedules: list[Schedule], now: float, deadline: str = DEFAULT_DEADLINE,
+             evening: str = DEFAULT_EVENING,
+             lead_minutes: int = DEFAULT_LEAD_MINUTES) -> dict[str, Any]:
+    """What the app reads: today, tomorrow, the next collection, and the knobs."""
     today = datetime.fromtimestamp(now).date()
     tomorrow = today + timedelta(days=1)
     upcoming = next_pickup(schedules, now)
@@ -183,7 +221,9 @@ def snapshot(schedules: list[Schedule], now: float, deadline: str = DEFAULT_DEAD
         "schedules": schedules_to_json(schedules),
         "today": due_on(schedules, today),
         "tomorrow": due_on(schedules, tomorrow),
-        "deadline": deadline,
+        "deadline": clean_deadline(deadline),
+        "evening": clean_evening(evening),
+        "lead_minutes": clamp_lead(lead_minutes),
         "next": (
             {"day": upcoming[0].isoformat(), "names": upcoming[1]} if upcoming else None
         ),

@@ -1,5 +1,11 @@
 # Ändringar
 
+## 0.10.3
+
+- **Sophämtning:** kvällsnotisens klockslag och nedräkningens försprung är nu
+  husets egna inställningar i appen (18:00 respektive 2 timmar som standard).
+  Ett sparande som inte nämner dem behåller det huset redan valt.
+
 ## 0.10.2
 
 - **Sophämtning:** påminnelsen och nedräkningen ankras nu vid husets egen frist i

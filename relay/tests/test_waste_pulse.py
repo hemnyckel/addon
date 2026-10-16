@@ -126,3 +126,27 @@ def test_the_countdown_ends_when_the_deadline_has_passed(cfg):
     assert len(ends) == 1
     assert ends[0]["token"] == "acttok"
     assert state.store.waste_activities() == []
+
+
+def test_the_evening_reminder_follows_the_households_hour(cfg):
+    state, fake = _pulse(cfg, EVEN_WEDNESDAY)
+    state.store.set_setting("waste_evening", "20:00")
+
+    asyncio.run(state._waste_tick(EVENING))  # six in the evening is too early now
+    assert _reminders(fake) == []
+
+    asyncio.run(state._waste_tick(datetime(2026, 10, 13, 20, 30).timestamp()))
+    assert len(_reminders(fake)) == 1
+
+
+def test_the_countdown_follows_the_households_lead(cfg):
+    state, fake = _pulse(cfg, EVEN_WEDNESDAY)
+    state.store.set_live_waste_start_token("dev1", "starttok")
+    state.store.set_setting("waste_lead_minutes", "15")
+
+    early = datetime(2026, 10, 14, 6, 20).timestamp()  # 25 minutes before the deadline
+    asyncio.run(state._waste_tick(early))
+    assert _starts(fake) == []
+
+    asyncio.run(state._waste_tick(MORNING))  # inside the last quarter
+    assert len(_starts(fake)) == 1

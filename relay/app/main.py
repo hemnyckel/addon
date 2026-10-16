@@ -95,15 +95,15 @@ _WASTE_DEADLINE_KEY = "waste_deadline"
 # goes out, and the records that keep it to one a day. They live in the store, so
 # a restart at 19:00 never sends a second reminder.
 _WASTE_INTERVAL = 300
-_WASTE_EVENING_TIME = "18:00"
 _WASTE_EVENING_SENT_KEY = "waste_evening_sent"
 _WASTE_MORNING_SENT_KEY = "waste_morning_sent"
 _WASTE_ACTIVE_KEY = "waste_activity"
-# The countdown may appear two hours before the deadline, and the morning
-# reminder goes out three quarters of an hour before it: both anchored to the
-# household's own deadline, so changing that moves them with it - a reminder that
-# arrives after the bins should have been out is worse than none.
-_WASTE_ACTIVITY_LEAD = 2 * 3600
+# The household's own knobs, set from the app: the hour the evening reminder goes
+# out, and how long before the deadline the countdown may appear.
+_WASTE_EVENING_KEY = "waste_evening"
+_WASTE_LEAD_KEY = "waste_lead_minutes"
+# The morning reminder goes out three quarters of an hour before the deadline -
+# anchored to it, so changing the deadline moves it along.
 _WASTE_REMINDER_LEAD = 45 * 60
 # The activity type the app renders; the schedule is a household fact rather
 # than a configurable module, so the name is a constant and not an option.
@@ -960,6 +960,14 @@ class State:
         """The morning the bins must be out by - the household's own, or ours."""
         return self.store.setting(_WASTE_DEADLINE_KEY) or waste.DEFAULT_DEADLINE
 
+    def waste_evening(self) -> str:
+        """The hour the evening reminder goes out, the household's own."""
+        return waste.clean_evening(self.store.setting(_WASTE_EVENING_KEY))
+
+    def waste_lead_minutes(self) -> int:
+        """How long before the deadline the countdown may appear, in minutes."""
+        return waste.clamp_lead(self.store.setting(_WASTE_LEAD_KEY))
+
     async def compute_energy_plan(self) -> dict[str, Any] | None:
         """Read the price sensor from Home Assistant and compute the plan.
 
@@ -1140,7 +1148,7 @@ class State:
         moment = time.time() if now is None else now
         today = datetime.fromtimestamp(moment).date()
         tomorrow = datetime.fromtimestamp(moment + 86400).date()
-        evening = _parse_hhmm(_WASTE_EVENING_TIME)
+        evening = _parse_hhmm(self.waste_evening())
         if evening is not None and _minutes_now(moment) >= evening:
             await self._remind_waste(schedules, day=tomorrow,
                                      key=_WASTE_EVENING_SENT_KEY, evening=True, now=moment)
@@ -1203,7 +1211,8 @@ class State:
         today = datetime.fromtimestamp(now).date()
         names = waste.due_on(schedules, today)
         deadline = waste.deadline_at(today, self.waste_deadline())
-        if not names or not deadline - _WASTE_ACTIVITY_LEAD <= now < deadline:
+        lead = self.waste_lead_minutes() * 60
+        if not names or not deadline - lead <= now < deadline:
             return
         record = {"names": names, "day": today.isoformat(), "deadline": deadline}
         self.store.set_setting(_WASTE_ACTIVE_KEY, json.dumps(record))
@@ -1819,7 +1828,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         The schedule is the household's, so every phone reads the same answer -
         and ``enabled`` tells the app whether anything is set up at all.
         """
-        return waste.snapshot(state.waste_schedules(), time.time(), state.waste_deadline())
+        return waste.snapshot(
+            state.waste_schedules(), time.time(), state.waste_deadline(),
+            state.waste_evening(), state.waste_lead_minutes(),
+        )
 
     @api.post("/waste/settings")
     async def set_waste_settings(payload: dict[str, Any],
@@ -1831,13 +1843,21 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         it and the app only edits it. A malformed row is dropped rather than
         rejected - a typo on one line must not cost the others their reminders.
         """
-        schedules = waste.parse_schedules(payload.get("schedules"))
-        deadline = str(payload.get("deadline") or waste.DEFAULT_DEADLINE)
+        schedules = waste.parse_schedules(
+            payload.get("schedules", waste.schedules_to_json(state.waste_schedules()))
+        )
+        deadline = waste.clean_deadline(payload.get("deadline", state.waste_deadline()))
+        evening = waste.clean_evening(payload.get("evening", state.waste_evening()))
+        lead = waste.clamp_lead(payload.get("lead_minutes", state.waste_lead_minutes()))
         state.store.set_setting(
             _WASTE_SCHEDULES_KEY, json.dumps(waste.schedules_to_json(schedules))
         )
         state.store.set_setting(_WASTE_DEADLINE_KEY, deadline)
-        return {"ok": True, **waste.snapshot(schedules, time.time(), deadline)}
+        state.store.set_setting(_WASTE_EVENING_KEY, evening)
+        state.store.set_setting(_WASTE_LEAD_KEY, str(lead))
+        return {"ok": True, **waste.snapshot(
+            schedules, time.time(), deadline, evening, lead
+        )}
 
     # -- people (owner only) -------------------------------------------------
     @api.post("/presence")

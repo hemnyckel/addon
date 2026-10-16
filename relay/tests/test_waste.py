@@ -68,7 +68,8 @@ def test_the_next_pickup_gives_up_when_nothing_is_within_reach():
 def test_the_deadline_falls_back_rather_than_failing():
     assert datetime.fromtimestamp(waste.deadline_at(WEDNESDAY_ODD)).strftime("%H:%M") == "06:45"
     assert datetime.fromtimestamp(waste.deadline_at(WEDNESDAY_ODD, "hej")).strftime("%H:%M") == "06:45"
-    assert datetime.fromtimestamp(waste.deadline_at(WEDNESDAY_ODD, "99:99")).strftime("%H:%M") == "23:59"
+    assert datetime.fromtimestamp(waste.deadline_at(WEDNESDAY_ODD, "99:99")).strftime("%H:%M") == "06:45"
+    assert datetime.fromtimestamp(waste.deadline_at(WEDNESDAY_ODD, "5:5")).strftime("%H:%M") == "05:05"
 
 
 def test_the_words_name_what_is_coming_and_by_when():
@@ -136,3 +137,21 @@ def test_the_push_to_start_goes_stale_when_the_deadline_passes():
     ended = waste.end_payload(state=state, timestamp=1_800_000_000)
     assert ended["aps"]["event"] == "end"
     assert ended["aps"]["dismissal-date"] == 1_800_000_060
+
+
+def test_the_knobs_are_clamped_and_cleaned():
+    """A household's own hour and lead, never nothing and never a whole day."""
+    assert waste.clamp_lead(None) == 120
+    assert waste.clamp_lead("5") == 15
+    assert waste.clamp_lead("9999") == 720
+    assert waste.clamp_lead("hej") == 120
+
+    assert waste.clean_evening("20:00") == "20:00"
+    assert waste.clean_evening("7:5") == "07:05"
+    assert waste.clean_evening("25:00") == "18:00"
+    assert waste.clean_evening(None) == "18:00"
+
+    snapshot = waste.snapshot([], 0)
+    assert snapshot["evening"] == "18:00"
+    assert snapshot["lead_minutes"] == 120
+    assert snapshot["deadline"] == "06:45"
