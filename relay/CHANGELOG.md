@@ -1,5 +1,18 @@
 # Ändringar
 
+## 0.10.6
+
+- **Parningskoden finns nu i Home Assistant** — som sensorn *Parningskod* på
+  reläets enhet, med en knapp *Ny parningskod* bredvid. Ingen behöver längre
+  öppna en logg för att komma igång med en ny telefon.
+  - Koden ligger på en **egen MQTT-topic**, aldrig i `/health` — den dokumentet
+    är öppet för alla som kan nå reläet, och en parningskod är en nyckel.
+  - Koden gäller i tio minuter; därefter visar sensorn *Utgången* och knappen
+    skapar en ny. Knappen är medvetet ingen automatisk förnyelse: en kod som
+    alltid är giltig är en dörr som alltid står öppen.
+  - Knappen och sensorn kommer via MQTT discovery, så de dyker upp av sig själva
+    på reläets enhet i Home Assistant.
+
 ## 0.10.5
 
 - **Lås:** reläet hittar en dörrs nycklar och låsdata även när dörren heter något

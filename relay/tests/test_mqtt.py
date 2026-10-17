@@ -225,6 +225,8 @@ def test_relay_discovery_matches_the_design():
     assert set(topics) == {
         "homeassistant/sensor/hemnyckel/relaet/config",
         "homeassistant/binary_sensor/hemnyckel/apns/config",
+        "homeassistant/sensor/hemnyckel/pairing/config",
+        "homeassistant/button/hemnyckel/pairing/config",
     }
     sensor = topics["homeassistant/sensor/hemnyckel/relaet/config"]
     assert sensor["state_topic"] == "hemnyckel/relay/state"
@@ -234,6 +236,15 @@ def test_relay_discovery_matches_the_design():
     binary = topics["homeassistant/binary_sensor/hemnyckel/apns/config"]
     assert binary["device_class"] == "connectivity"
     assert binary["value_template"] == "{{ 'ON' if value_json.apns else 'OFF' }}"
+
+    # The pairing code is read in the interface, not in a log - and it has its
+    # own topic, because /health is open to anyone who can reach the relay.
+    pairing = topics["homeassistant/sensor/hemnyckel/pairing/config"]
+    assert pairing["state_topic"] == "hemnyckel/relay/pairing"
+    assert pairing["state_topic"] != "hemnyckel/relay/state"
+    assert pairing["value_template"] == "{{ value_json.code if value_json.valid else 'Utgången' }}"
+    button = topics["homeassistant/button/hemnyckel/pairing/config"]
+    assert button["command_topic"] == "hemnyckel/relay/pairing/new"
 
 
 def test_broker_settings_need_host_user_and_password():

@@ -38,6 +38,10 @@ NAMESPACE = "hemnyckel"
 DISCOVERY_PREFIX = "homeassistant"
 
 RELAY_STATE_TOPIC = "hemnyckel/relay/state"
+# The pairing code gets its own topic, never the health document: /health is
+# open to anyone who can reach the relay, and a pairing code is a key.
+PAIRING_TOPIC = "hemnyckel/relay/pairing"
+PAIRING_COMMAND_TOPIC = "hemnyckel/relay/pairing/new"
 AVAILABILITY_TOPIC = "hemnyckel/relay/availability"
 
 # The person slugs the bridge last published, kept in the relay's own store so
@@ -261,6 +265,10 @@ def relay_discovery() -> list[tuple[str, dict[str, Any]]]:
     side) and ``events`` for the journal's pulse, as attributes) and a
     connectivity binary_sensor for whether push is configured - the thing to
     glance at the day the Apple key lands.
+
+    Plus the two the household actually needs to get started: the pairing code
+    as a sensor (so it is read in the interface, never in a log) and a button
+    that mints a fresh one, because a code is only valid for ten minutes.
     """
     return [
         (
@@ -284,6 +292,30 @@ def relay_discovery() -> list[tuple[str, dict[str, Any]]]:
                 "state_topic": RELAY_STATE_TOPIC,
                 "value_template": "{{ 'ON' if value_json.apns else 'OFF' }}",
                 "device_class": "connectivity",
+                "availability_topic": AVAILABILITY_TOPIC,
+                "device": DEVICE,
+            },
+        ),
+        (
+            f"{DISCOVERY_PREFIX}/sensor/{NAMESPACE}/pairing/config",
+            {
+                "name": "Parningskod",
+                "unique_id": "hemnyckel_pairing",
+                "state_topic": PAIRING_TOPIC,
+                "value_template": "{{ value_json.code if value_json.valid else 'Utgången' }}",
+                "json_attributes_topic": PAIRING_TOPIC,
+                "icon": "mdi:key-variant",
+                "availability_topic": AVAILABILITY_TOPIC,
+                "device": DEVICE,
+            },
+        ),
+        (
+            f"{DISCOVERY_PREFIX}/button/{NAMESPACE}/pairing/config",
+            {
+                "name": "Ny parningskod",
+                "unique_id": "hemnyckel_new_pairing",
+                "command_topic": PAIRING_COMMAND_TOPIC,
+                "icon": "mdi:key-variant",
                 "availability_topic": AVAILABILITY_TOPIC,
                 "device": DEVICE,
             },
@@ -420,9 +452,13 @@ class MqttBridge:
 
     def __init__(self, cfg: Any, store: Any, *, version: str,
                  facts: Callable[[], dict[str, Any]] | None = None,
+                 pairing: Callable[[], dict[str, Any]] | None = None,
+                 renew_pairing: Callable[[], Any] | None = None,
                  settings: MqttSettings | None = None,
                  publish: Callable[[str, str, bool], None] | None = None) -> None:
         self._store = store
+        self._pairing = pairing
+        self._renew_pairing = renew_pairing
         self._facts = facts or (
             lambda: {"status": "ok", "ha": False, "apns": False,
                      "doors": len(getattr(cfg, "doors", []) or []), "version": version,
@@ -507,6 +543,7 @@ class MqttBridge:
             _LOGGER.warning("MQTT connect refused: %s", reason_code)
             return
         client.subscribe(f"{NAMESPACE}/people/+/role/set", qos=1)
+        client.subscribe(PAIRING_COMMAND_TOPIC, qos=1)
         client.publish(AVAILABILITY_TOPIC, "online", retain=True, qos=1)
         # The truth is published from the event loop, where the store lives.
         if self._loop is not None:
@@ -670,6 +707,8 @@ class MqttBridge:
         retained document converges on the same facts ``/health`` reports.
         """
         self.publish(RELAY_STATE_TOPIC, self._facts())
+        if self._pairing is not None:
+            self.publish(PAIRING_TOPIC, self._pairing())
 
     async def _refresh_periodically(self) -> None:
         while True:
@@ -686,6 +725,13 @@ class MqttBridge:
         person's state is republished after every attempt - accepted or refused.
         """
         match = _COMMAND_TOPIC.match(topic)
+        if topic == PAIRING_COMMAND_TOPIC:
+            # A fresh code, published at once so the interface shows the new
+            # one without waiting for the refresh.
+            if self._renew_pairing is not None:
+                self._renew_pairing()
+                self.publish_state()
+            return
         if match is None:
             return
         s = match.group(1)

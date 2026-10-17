@@ -527,7 +527,9 @@ class State:
         self.apns = ApnsClient(cfg)
         # The MQTT bridge is a projection of what this store holds, published to
         # Home Assistant; it stays off unless the supervisor injected a broker.
-        self.mqtt = MqttBridge(cfg, self.store, version=__version__, facts=self.health)
+        self.mqtt = MqttBridge(cfg, self.store, version=__version__, facts=self.health,
+                               pairing=self.pairing_info,
+                               renew_pairing=self.new_pair_code)
         # The bridge connects to the broker before Home Assistant is up, so its
         # first retained document says "ha": false. The HA connection coming up
         # is the moment that becomes untrue, and this republishes the facts.
@@ -640,6 +642,20 @@ class State:
         self.pair_code = secrets.token_hex(3).upper()
         self.pair_expires = time.time() + _PAIR_TTL
         return self.pair_code
+
+    def pairing_info(self) -> dict[str, Any]:
+        """The pairing code as Home Assistant shows it: the code while it is
+        valid, and how many seconds that lasts.
+
+        It goes on its own topic and never into /health - that document is open
+        to anyone who can reach the relay, and a pairing code is a key.
+        """
+        left = max(0.0, self.pair_expires - time.time())
+        return {
+            "code": self.pair_code if left > 0 else "",
+            "expires_in": int(left),
+            "valid": left > 0,
+        }
 
     def pairing_allowed(self, client: str) -> bool:
         """Record a pairing attempt; False once the client is over the limit."""
