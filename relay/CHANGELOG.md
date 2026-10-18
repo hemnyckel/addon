@@ -1,5 +1,12 @@
 # Ändringar
 
+## 0.10.11
+
+- **En gäst får en identitet när livet skrivs.** Gästen får därmed ett stabilt
+  id och kan ges en ikon redan innan någon telefon har parkopplats — annars
+  svarade ikonväljaren "okänd person" för en gäst som bara fanns som inbjudan
+  eller kod.
+
 ## 0.10.10
 
 - **Gäster är personer i Personer.** En gäst finns från det att livet skrivs —

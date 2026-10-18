@@ -545,6 +545,7 @@ class Store:
         is the guest, and an invitation or a code made under Nycklar both leave
         one behind. Updating it never moves `created`.
         """
+        self._ensure_person(person)
         self._db.execute(
             "INSERT INTO guest_lives "
             "(person, doors, days, from_time, to_time, expires, created) "
@@ -675,6 +676,7 @@ class Store:
         from_time: str | None, to_time: str | None, expires: float | None,
     ) -> None:
         """Move a whole guest life at once - every device, invite and the life."""
+        self._ensure_person(person)
         values = (
             json.dumps(doors), json.dumps(days), from_time, to_time, expires,
         )

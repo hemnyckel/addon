@@ -1298,6 +1298,7 @@ def test_an_unredeemed_guest_is_a_person_the_app_can_edit(cfg):
         guest = next(p for p in people if p["name"] == "Margareta")
         assert guest["role"] == "guest"
         assert guest["devices"] == []
+        assert guest["id"]
         assert guest["doors"] == ["front"]
         assert guest["days"] == [5]
         assert guest["from_time"] == "07:45"
@@ -1335,6 +1336,7 @@ def test_a_code_made_under_keys_becomes_a_guest_in_people(cfg):
         guest = next(p for p in people if p["name"] == "Städfirma")
         assert guest["role"] == "guest"
         assert guest["devices"] == []
+        assert guest["id"]
         assert guest["doors"] == ["front"]
         assert app.state.hmk.store.guest_slots("Städfirma") == {"front": 6}
         assert app.state.hmk.store.guest_life("Städfirma") is not None
