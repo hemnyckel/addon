@@ -2742,6 +2742,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         door gets the same digits, so nobody has to remember which code belongs
         to which door.
         """
+        # Temporary diagnostics for the app's create-person flow. The PIN is
+        # never in the payload of a first attempt; keep it out regardless.
+        _LOGGER.info(
+            "guest-codes request: %s",
+            {k: v for k, v in payload.items() if k != "code"},
+        )
         name = str(payload.get("name") or "").strip()
         if not name:
             raise HTTPException(400, "a name is required")
