@@ -1538,13 +1538,16 @@ class State:
             if not ok:
                 _LOGGER.warning("revoke: door %s slot %s not reached", door_id, slot)
 
-    async def revoke_person_codes(self, person: str) -> list[str]:
+    async def revoke_person_codes(self, person: str, *,
+                                  skip: set[tuple[str, int]] | None = None) -> list[str]:
         """Clear every lock code a person holds, best-effort.
 
         For a guest without a phone there is no device to revoke, so the
         person's own registry and every invitation that carried their slots are
-        the sources. Returns the doors that could not be reached: a guest is
-        never forgotten while a code is still live on a lock.
+        the sources. ``skip`` names slots already cleared as complete slots
+        (PIN and fingerprint), so a deletion never asks twice. Returns the
+        doors that could not be reached: a guest is never forgotten while a
+        code is still live on a lock.
         """
         slots: dict[str, int] = {}
         for invite in self.store.invites_for_person(person):
@@ -1554,6 +1557,8 @@ class State:
         for door_id, slot in slots.items():
             if self.cfg.door(door_id) is None:
                 continue
+            if skip is not None and (door_id, int(slot)) in skip:
+                continue
             if not await self.revoke_lock_guest(door_id, int(slot)):
                 failed.append(door_id)
         if not failed:
@@ -1561,6 +1566,40 @@ class State:
                 self.store.clear_invite_slots(str(invite["code"]))
             self.store.set_guest_slots(person, {})
         return failed
+
+    async def clear_person_slots(
+        self, person: str
+    ) -> tuple[list[tuple[str, int]], list[str]]:
+        """Clear every named slot a person holds — PIN, finger and RFID.
+
+        This is the complete deletion: the slot name is what makes a credential
+        a person, so leaving a template behind would resurrect them as an
+        unnamed access-only row. Returns the cleared slots and the doors that
+        failed; a person is never forgotten while a fingerprint is still live.
+        """
+        states = await self.ha.states()
+        cleared: list[tuple[str, int]] = []
+        failed: list[str] = []
+        for door in self.cfg.doors:
+            slots_state = _slot_sensor(states, door, "_slots")
+            if slots_state is None:
+                continue
+            attrs = _attributes(slots_state)
+            entry_id = str(attrs.get("entry_id") or door.entry_id or "")
+            if not entry_id:
+                continue
+            for row in _slot_rows(attrs, door.id):
+                if str(row.get("name") or "").strip() != person:
+                    continue
+                ok = await self.ha.call_service(
+                    "hemnyckel", "clear_slot",
+                    {"slot": int(row["slot"]), "entry_id": entry_id},
+                )
+                if ok:
+                    cleared.append((door.id, int(row["slot"])))
+                else:
+                    failed.append(door.id)
+        return cleared, failed
 
     # -- editing a guest: the person, and the codes on every lock -------------
     async def guest_kind(self, door_id: str, slot: int) -> str | None:
@@ -2267,18 +2306,34 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             (g for g in state.store.directory() if g.get("name") == person), None
         )
         if group is None:
-            raise HTTPException(404, "unknown person")
-        if group.get("role") != "guest":
-            raise HTTPException(409, "only a guest can be removed here")
+            access = next(
+                (a for a in await state.access_people() if a["name"] == person),
+                None,
+            )
+            if access is None:
+                raise HTTPException(404, "unknown person")
+            group = {
+                "name": person, "role": "user", "doors": access["doors"],
+                "days": None, "from_time": None, "to_time": None,
+                "expires": None, "devices": [],
+            }
         if group.get("devices"):
-            raise HTTPException(409, "remove the guest's device instead")
-        failed = await state.revoke_person_codes(person)
+            raise HTTPException(409, "remove the person's device instead")
+        # Clear the whole slot first (PIN, fingerprint, RFID), so a template
+        # cannot resurrect the person as an unnamed row; then clear any code
+        # the relay knew about but the slot table no longer names.
+        cleared, failed = await state.clear_person_slots(person)
+        if failed:
+            raise HTTPException(
+                502, f"a slot could not be cleared on {', '.join(failed)}"
+            )
+        failed = await state.revoke_person_codes(person, skip=set(cleared))
         if failed:
             raise HTTPException(
                 502, f"the code could not be cleared on {', '.join(failed)}"
             )
         state.store.remove_guest(person)
-        _LOGGER.info("Guest %s removed", person)
+        _LOGGER.info("Person %s removed", person)
         return {"ok": True, "person": person}
 
     @api.get("/devices")
@@ -2385,6 +2440,33 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"code": code, "role": role, "expires_at": expires,
                 "doors": doors, "days": days, "guest_codes": guest_codes,
                 "failed": failed_doors}
+
+    @api.post("/people")
+    async def create_person(payload: dict[str, Any],
+                            _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Create a person who has no device and no code yet.
+
+        They exist so a fingerprint can be enrolled into a slot for them: the
+        name is the person, and the enrolment names the slot. A duplicate name
+        is refused rather than silently merged, because two "Bella" rows would
+        split one person's history.
+        """
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "a name is required")
+        existing = next(
+            (g for g in state.store.directory() if g.get("name") == name), None
+        )
+        if existing is None:
+            existing = next(
+                (a for a in await state.access_people() if a["name"] == name),
+                None,
+            )
+        if existing is not None:
+            raise HTTPException(409, "a person with that name already exists")
+        state.store.add_person(name)
+        _LOGGER.info("Person %s created without app or code", name)
+        return {"ok": True, "person": name}
 
     @api.post("/people/{person}/invite")
     async def invite_person(person: str,

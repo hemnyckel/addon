@@ -199,7 +199,10 @@ class Store:
                 avatar_symbol TEXT,
                 avatar_color TEXT,
                 avatar_version INTEGER NOT NULL DEFAULT 0,
-                avatar_updated REAL
+                avatar_updated REAL,
+                -- A person created without a device or a life: a name and a
+                -- fingerprint still make them a person in Personer.
+                visible INTEGER NOT NULL DEFAULT 0
             );
             -- A guest's life, whether or not they ever pair a phone: doors,
             -- window and end date. The person is the key, so "Margareta" is one
@@ -215,6 +218,13 @@ class Store:
             );
             """
         )
+        person_columns = {
+            row["name"] for row in self._db.execute("PRAGMA table_info(people)")
+        }
+        if "visible" not in person_columns:
+            self._db.execute(
+                "ALTER TABLE people ADD COLUMN visible INTEGER NOT NULL DEFAULT 0"
+            )
         # Migration for databases created before apns_env existed.
         columns = {row["name"] for row in self._db.execute("PRAGMA table_info(devices)")}
         if "apns_env" not in columns:
@@ -340,6 +350,16 @@ class Store:
     def ensure_person(self, name: str) -> None:
         """Give a name an identity now; used when a slot-only person is invited."""
         self._ensure_person(name)
+        self._db.commit()
+
+    def add_person(self, name: str) -> None:
+        """A person with no device, no code and no guest life: a finger can follow.
+
+        The visible flag is what puts them in Personer; a name alone would stay a
+        hidden identity (like the identities older guests left behind).
+        """
+        self._ensure_person(name)
+        self._db.execute("UPDATE people SET visible = 1 WHERE name = ?", (name,))
         self._db.commit()
 
     def drop_invite(self, code: str) -> None:
@@ -617,6 +637,17 @@ class Store:
                 "days": _json_list(invite["days"]) or None,
                 "from_time": invite["from_time"], "to_time": invite["to_time"],
                 "expires": invite["expires"], "devices": [],
+            }
+        for person in self._db.execute(
+            "SELECT * FROM people WHERE visible = 1 ORDER BY name"
+        ):
+            name = str(person["name"] or "").strip()
+            if not name or name in groups:
+                continue
+            groups[name] = {
+                "name": name, "role": "user", "doors": None, "days": None,
+                "from_time": None, "to_time": None, "expires": None,
+                "devices": [], "access_only": True, "credentials": [],
             }
         people = [self._with_identity(group) for group in groups.values()]
         return sorted(

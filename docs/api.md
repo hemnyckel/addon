@@ -156,6 +156,13 @@ POST /pair-code                  # owner only; a fresh code for a new device
 `GET /state` also carries the caller's `role`, `device_id` and — for a guest —
 `expires`, so the app can show only what the role may.
 
+```
+POST /people                      # owner only; a person before their first finger
+  { "name": "Nora" }
+  -> 200 { "ok": true, "person": "Nora" }
+  -> 409 a person with that name already exists
+```
+
 `GET /people` is the Personer screen and is built from **people, not phones**:
 paired devices, guests who have a life but no phone (an unredeemed invitation,
 or a code made under Nycklar), people who only exist as a **named slot** in the
@@ -189,11 +196,13 @@ written to every door. A guest keeps its life: doors, days, window and end date
 are untouched, so a new code never changes when it works. `code` is optional and
 exists so a retry can reuse the digits already shown.
 
-`DELETE /people/<person>` removes a guest who has **no phone of their own**. The
-lock codes are cleared first; a door that cannot be reached refuses the removal
-(`502` with the failing doors), because a forgotten guest with a live code is
-worse than a visible one. A guest with a device is removed from the device list
-instead (`DELETE /devices/<id>`).
+`DELETE /people/<person>` removes a person who has **no phone of their own** —
+a guest, or someone who only has a fingerprint. Every named slot is cleared
+first (PIN, fingerprint and RFID), then any code the relay knew about, so a
+template can never resurrect the person as an unnamed row. A door that cannot
+be reached refuses the removal (`502` with the failing doors), because a
+forgotten credential is worse than a visible person. Someone with a device is
+removed from the device list instead (`DELETE /devices/<id>`).
 
 ### Guests
 

@@ -529,7 +529,22 @@ class FakeHa:
 
     async def call_service(self, domain: str, service: str, data: dict) -> bool:
         self.calls.append((domain, service, data))
+        if self.ok and service == "clear_slot":
+            # The integration clears the slot's credentials and forgets its
+            # name; mirror that so a name cannot linger in a later read.
+            self._clear_slot(int(data.get("slot", -1)), str(data.get("entry_id") or ""))
         return self.ok
+
+    def _clear_slot(self, slot: int, entry_id: str) -> None:
+        for state in self._states:
+            attrs = state.get("attributes") or {}
+            if entry_id and str(attrs.get("entry_id") or "") != entry_id:
+                continue
+            rows = attrs.get("slots") or []
+            attrs["slots"] = [
+                row for row in rows
+                if int(row.get("slot", -1)) != slot
+            ]
 
     async def call_service_result(self, domain: str, service: str, data: dict):
         self.calls.append((domain, service, data))
@@ -1591,3 +1606,71 @@ def test_a_new_code_for_a_family_person_needs_a_door(cfg):
         # A family person has no guest life to take doors from.
         assert response.status_code == 400
         assert fake.calls == []
+
+
+# -- a person before their first credential ---------------------------------
+
+def test_a_person_can_be_created_before_their_first_finger(cfg):
+    fake = FakeHa(states=guest_sensor_states(("front", "Ytterdörren", "ent-front")))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        fake.calls.clear()
+        result = client.post("/api/people", headers=owner,
+                             json={"name": "Nora"}).json()
+
+        assert result == {"ok": True, "person": "Nora"}
+        assert fake.calls == []  # nothing reaches a lock
+        people = client.get("/api/people", headers=owner).json()["people"]
+        nora = next(p for p in people if p["name"] == "Nora")
+        assert nora["role"] == "user"
+        assert nora["devices"] == []
+        assert nora["access_only"] is True
+        assert nora["credentials"] == []
+        assert nora["id"]
+
+
+def test_a_person_without_credentials_can_be_removed_again(cfg):
+    fake = FakeHa(states=guest_sensor_states(("front", "Ytterdörren", "ent-front")))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        client.post("/api/people", headers=owner, json={"name": "Nora"})
+
+        assert client.delete("/api/people/Nora", headers=owner).status_code == 200
+        names = [p["name"] for p in client.get("/api/people", headers=owner).json()["people"]]
+        assert "Nora" not in names
+        assert fake.calls == []
+
+
+def test_deleting_a_fingerprint_only_person_clears_the_slot(cfg):
+    fake = FakeHa(states=slot_states(
+        ("front", "Ytterdörren", "ent-front",
+         [{"slot": 11, "name": "Bella", "credentials": ["fingerprint"]}]),
+    ))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        fake.calls.clear()
+        assert client.delete("/api/people/Bella", headers=owner).status_code == 200
+
+        clears = [c for c in fake.calls if c[1] == "clear_slot"]
+        assert clears == [("hemnyckel", "clear_slot",
+                           {"slot": 11, "entry_id": "ent-front"})]
+        names = [p["name"] for p in client.get("/api/people", headers=owner).json()["people"]]
+        assert "Bella" not in names
+
+
+def test_a_duplicate_person_name_is_refused(cfg):
+    fake = FakeHa(states=slot_states(
+        ("front", "Ytterdörren", "ent-front",
+         [{"slot": 11, "name": "Bella", "credentials": ["fingerprint"]}]),
+    ))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+
+        assert client.post("/api/people", headers=owner,
+                           json={"name": "Bella"}).status_code == 409
+        assert client.post("/api/people", headers=owner,
+                           json={"name": "  "}).status_code == 400

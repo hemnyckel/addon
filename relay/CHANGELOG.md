@@ -1,5 +1,15 @@
 # Ändringar
 
+## 0.10.16
+
+- **`POST /people` — en person innan första fingret.** En person kan skapas utan
+  app och utan kod, så ett finger kan läggas till i en ledig plats. Personen syns
+  i Personer direkt, får identitet och ikon och kan senare bjudas in till appen.
+- **Borttagning rensar hela platsen.** `DELETE /people/{person}` rensar PIN,
+  finger och RFID per namngiven plats — inte bara koden — och fungerar även för
+  en person som bara har finger. En borttagen persons finger kan därför inte
+  återuppstå som en namnlös åtkomst.
+
 ## 0.10.15
 
 - **Återförsök med samma kod även för en befintlig person.**
