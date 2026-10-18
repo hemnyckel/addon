@@ -20,6 +20,13 @@ _LOGGER = logging.getLogger("hemnyckel.ha")
 
 EventHandler = Callable[[dict[str, Any]], Awaitable[None]]
 
+# A service call is not a state read: `hemnyckel.clear_slot` may clear a PIN and
+# a fingerprint, and the Nimly is a battery lock that has to be woken between
+# attempts. Measured live, one clear can outlast the client's 15 s default and
+# then surfaces as a 500 in the app ("Reläet svarade inte som väntat") even
+# though Home Assistant went on to finish the job. Reads keep the short default.
+SERVICE_TIMEOUT = 45.0
+
 
 class HaClient:
     def __init__(self, cfg: Config, on_event: EventHandler,
@@ -99,11 +106,18 @@ class HaClient:
         if self._http is None:
             _LOGGER.info("[dev] would call %s.%s %s", domain, service, data)
             return True
-        resp = await self._http.post(
-            f"/api/services/{domain}/{service}",
-            json=data,
-            headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
-        )
+        try:
+            resp = await self._http.post(
+                f"/api/services/{domain}/{service}",
+                json=data,
+                headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
+                timeout=SERVICE_TIMEOUT,
+            )
+        except httpx.HTTPError as err:
+            # A slow lock must read as "the door did not answer", never as a
+            # crash in the relay: the endpoint turns False into a 502.
+            _LOGGER.warning("HA %s.%s failed (%s)", domain, service, err)
+            return False
         if resp.status_code >= 400:
             _LOGGER.warning("HA %s.%s -> %s %s", domain, service, resp.status_code, resp.text[:200])
             return False
@@ -129,6 +143,7 @@ class HaClient:
                 f"/api/services/{domain}/{service}?return_response",
                 json=data,
                 headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
+                timeout=SERVICE_TIMEOUT,
             )
         except httpx.HTTPError as err:
             _LOGGER.warning("HA %s.%s failed (%s)", domain, service, err)

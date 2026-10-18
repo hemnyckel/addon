@@ -1,5 +1,15 @@
 # Ändringar
 
+## 0.10.7
+
+- **Lås: en långsam låsoperation kraschar inte längre reläet.** Ett anrop till
+  `hemnyckel.clear_slot` rensar PIN och fingeravtryck, och Nimly-låset är
+  batteridrivet och måste väckas mellan försöken — det kan ta längre tid än
+  HTTP-klientens 15 sekunder. Timeouten blev då ett ospårat 500-svar och appen
+  visade *"Reläet svarade inte som väntat"*, medan Home Assistant fortsatte och
+  ofta hann bli klar. Tjänsteanrop får nu 45 sekunder, och en timeout rapporteras
+  som ett avslag (502) i stället för ett kraschat anrop.
+
 ## 0.10.6
 
 - **Parningskoden finns nu i Home Assistant** — som sensorn *Parningskod* på
