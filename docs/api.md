@@ -156,10 +156,24 @@ POST /pair-code                  # owner only; a fresh code for a new device
 `GET /state` also carries the caller's `role`, `device_id` and — for a guest —
 `expires`, so the app can show only what the role may.
 
+`GET /people` is the Personer screen and is built from **people, not phones**:
+paired devices, guests who have a life but no phone (an unredeemed invitation,
+or a code made under Nycklar) and their devices beneath. A guest's life — doors,
+days, window, end date — is the source of truth for that guest, so it can be
+edited whether or not they ever install the app.
+
+`DELETE /people/<person>` removes a guest who has **no phone of their own**. The
+lock codes are cleared first; a door that cannot be reached refuses the removal
+(`502` with the failing doors), because a forgotten guest with a live code is
+worse than a visible one. A guest with a device is removed from the device list
+instead (`DELETE /devices/<id>`).
+
 ### Guests
 
 An owner invites a guest with a **name, the doors they may use and a window**.
-The guest redeems the code with `POST /pair` and becomes a `guest` device.
+The guest redeems the code with `POST /pair` and becomes a `guest` device. The
+invitation also writes the guest's **life** (`guest_lives`), so the guest exists
+in Personer from that moment — paired or not.
 
 ```
 POST /invites                    # owner only

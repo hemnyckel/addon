@@ -201,6 +201,18 @@ class Store:
                 avatar_version INTEGER NOT NULL DEFAULT 0,
                 avatar_updated REAL
             );
+            -- A guest's life, whether or not they ever pair a phone: doors,
+            -- window and end date. The person is the key, so "Margareta" is one
+            -- guest with one code across doors - not one row per invitation.
+            CREATE TABLE IF NOT EXISTS guest_lives (
+                person TEXT PRIMARY KEY,
+                doors TEXT,
+                days TEXT,
+                from_time TEXT,
+                to_time TEXT,
+                expires REAL,
+                created REAL NOT NULL
+            );
             """
         )
         # Migration for databases created before apns_env existed.
@@ -516,6 +528,102 @@ class Store:
         group["avatar"] = self.avatar_descriptor(person)
         return group
 
+    # -- the Personer screen: people, not only phones ------------------------
+    def guest_life(self, person: str) -> sqlite3.Row | None:
+        """A guest's life - doors, window, end date - whether or not they pair."""
+        return self._db.execute(
+            "SELECT * FROM guest_lives WHERE person = ?", (person,)
+        ).fetchone()
+
+    def set_guest_life(
+        self, person: str, doors: list[str], days: list[int],
+        from_time: str | None, to_time: str | None, expires: float | None,
+    ) -> None:
+        """Write a guest's life once, keyed by the person.
+
+        This is what makes a guest exist before (and without) a phone: the row
+        is the guest, and an invitation or a code made under Nycklar both leave
+        one behind. Updating it never moves `created`.
+        """
+        self._db.execute(
+            "INSERT INTO guest_lives "
+            "(person, doors, days, from_time, to_time, expires, created) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(person) DO UPDATE SET doors = excluded.doors, "
+            "days = excluded.days, from_time = excluded.from_time, "
+            "to_time = excluded.to_time, expires = excluded.expires",
+            (
+                person, json.dumps(doors), json.dumps(days),
+                from_time, to_time, expires, time.time(),
+            ),
+        )
+        self._db.commit()
+
+    def directory(self) -> list[dict[str, Any]]:
+        """Everyone the Personer screen shows - people, not only their phones.
+
+        Built from devices (family), guest lives (a guest exists from the moment
+        their life is written, paired or not) and - for rows that predate guest
+        lives - unredeemed guest invitations. The life is the source of truth
+        for a guest's doors, window and end date; devices stay the rows beneath
+        a person who has a phone.
+        """
+        groups: dict[str, dict[str, Any]] = {
+            str(group.get("name") or ""): group for group in self.people()
+        }
+        for life in self._db.execute("SELECT * FROM guest_lives ORDER BY created"):
+            name = str(life["person"] or "").strip()
+            if not name:
+                continue
+            group = groups.get(name)
+            if group is None:
+                group = {
+                    "name": name, "role": "guest", "doors": None, "days": None,
+                    "from_time": None, "to_time": None, "expires": None,
+                    "devices": [],
+                }
+                groups[name] = group
+            elif group.get("role") != "guest":
+                continue  # a family member with a stale life row is still family
+            group.update({
+                "doors": _json_list(life["doors"]) or None,
+                "days": _json_list(life["days"]) or None,
+                "from_time": life["from_time"],
+                "to_time": life["to_time"],
+                "expires": life["expires"],
+            })
+        for invite in self._db.execute(
+            "SELECT * FROM invites WHERE used_by IS NULL AND role = 'guest'"
+        ):
+            name = str(invite["name"] or "").strip()
+            if not name or name in groups:
+                continue
+            groups[name] = {
+                "name": name, "role": "guest",
+                "doors": _json_list(invite["doors"]) or None,
+                "days": _json_list(invite["days"]) or None,
+                "from_time": invite["from_time"], "to_time": invite["to_time"],
+                "expires": invite["expires"], "devices": [],
+            }
+        people = [self._with_identity(group) for group in groups.values()]
+        return sorted(
+            people,
+            key=lambda group: (not group["name"], group["name"] or ""),
+        )
+
+    def invites_for_person(self, person: str) -> list[sqlite3.Row]:
+        return self._db.execute(
+            "SELECT * FROM invites WHERE name = ?", (person,)
+        ).fetchall()
+
+    def remove_guest(self, person: str) -> None:
+        """Delete a guest who has no phone; the identity and photo go with it."""
+        self._db.execute("DELETE FROM guest_lives WHERE person = ?", (person,))
+        self._db.execute("DELETE FROM invites WHERE name = ?", (person,))
+        self._db.execute("DELETE FROM presence WHERE person = ?", (person,))
+        self._db.commit()
+        self._prune_person(person)
+
     # -- guest life: the person's own code slots -----------------------------
     def _all_guest_slots(self) -> dict[str, dict[str, int]]:
         result: dict[str, dict[str, int]] = {}
@@ -566,11 +674,28 @@ class Store:
         self, person: str, doors: list[str], days: list[int],
         from_time: str | None, to_time: str | None, expires: float | None,
     ) -> None:
-        """Move a whole guest life at once - every one of the person's devices."""
+        """Move a whole guest life at once - every device, invite and the life."""
+        values = (
+            json.dumps(doors), json.dumps(days), from_time, to_time, expires,
+        )
         self._db.execute(
             "UPDATE devices SET doors = ?, days = ?, from_time = ?, to_time = ?, "
             "expires = ? WHERE person = ?",
-            (json.dumps(doors), json.dumps(days), from_time, to_time, expires, person),
+            (*values, person),
+        )
+        self._db.execute(
+            "UPDATE invites SET doors = ?, days = ?, from_time = ?, to_time = ?, "
+            "expires = ? WHERE name = ? AND used_by IS NULL",
+            (*values, person),
+        )
+        self._db.execute(
+            "INSERT INTO guest_lives "
+            "(person, doors, days, from_time, to_time, expires, created) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(person) DO UPDATE SET doors = excluded.doors, "
+            "days = excluded.days, from_time = excluded.from_time, "
+            "to_time = excluded.to_time, expires = excluded.expires",
+            (person, *values, time.time()),
         )
         self._db.commit()
 
@@ -583,6 +708,13 @@ class Store:
         self._db.execute("UPDATE devices SET person = ? WHERE person = ?", (new, old))
         self._db.execute("UPDATE presence SET person = ? WHERE person = ?", (new, old))
         self._db.execute("UPDATE invites SET name = ? WHERE name = ?", (new, old))
+        if self.guest_life(new) is None:
+            self._db.execute(
+                "UPDATE guest_lives SET person = ? WHERE person = ?", (new, old)
+            )
+        else:
+            # A merge onto an existing guest: the established life wins.
+            self._db.execute("DELETE FROM guest_lives WHERE person = ?", (old,))
         moved = self.person_by_name(old)
         taken = self.person_by_name(new)
         if moved is not None and taken is None:
@@ -743,8 +875,10 @@ class Store:
         ).fetchone()
         if int(count["c"]) > 0:
             return
+        self._db.execute("DELETE FROM guest_lives WHERE person = ?", (name,))
         person = self.person_by_name(name)
         if person is None:
+            self._db.commit()
             return
         self._remove_avatar_file(str(person["id"]))
         self._db.execute("DELETE FROM people WHERE id = ?", (person["id"],))

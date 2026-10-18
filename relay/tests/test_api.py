@@ -1273,3 +1273,132 @@ def test_a_retry_code_must_look_like_a_code(cfg):
 
         assert response.status_code == 400
         assert fake.calls == []
+
+
+# -- guests are people, not only phones --------------------------------------
+
+def test_an_unredeemed_guest_is_a_person_the_app_can_edit(cfg):
+    """A guest exists from their life, not from a paired phone.
+
+    Before this, `people()` was built from devices only: an invitation that had
+    not been redeemed vanished from Personer, and the guest editor answered 404
+    even though the lock codes existed.
+    """
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        invite = guest_invite(client, owner, name="Margareta", days=[5],
+                              from_time="07:45", to_time="12:00")
+
+        people = client.get("/api/people", headers=owner).json()["people"]
+        guest = next(p for p in people if p["name"] == "Margareta")
+        assert guest["role"] == "guest"
+        assert guest["devices"] == []
+        assert guest["doors"] == ["front"]
+        assert guest["days"] == [5]
+        assert guest["from_time"] == "07:45"
+
+        fake.calls.clear()
+        body = client.post("/api/people/Margareta/guest", headers=owner, json={
+            "name": "Margareta", "doors": ["front"], "days": [6],
+            "from_time": "08:00", "to_time": "09:00",
+            "expires_at": invite["expires_at"] + 3600,
+        }).json()
+
+        assert body["ok"] is True
+        assert "front" not in body["failed"]
+        life = app.state.hmk.store.guest_life("Margareta")
+        assert json.loads(life["days"]) == [6]
+        assert life["from_time"] == "08:00"
+        assert app.state.hmk.store.guest_slots("Margareta") == {"front": 6}
+
+
+def test_a_code_made_under_keys_becomes_a_guest_in_people(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        result = client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"],
+            "expires_at": time.time() + 7 * 86400,
+        }).json()
+
+        assert result["ok"] is True
+        people = client.get("/api/people", headers=owner).json()["people"]
+        guest = next(p for p in people if p["name"] == "Städfirma")
+        assert guest["role"] == "guest"
+        assert guest["devices"] == []
+        assert guest["doors"] == ["front"]
+        assert app.state.hmk.store.guest_slots("Städfirma") == {"front": 6}
+        assert app.state.hmk.store.guest_life("Städfirma") is not None
+
+
+def test_a_guest_without_a_phone_is_removed_with_their_codes(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"],
+            "expires_at": time.time() + 7 * 86400,
+        })
+
+        fake.calls.clear()
+        assert client.delete("/api/people/Städfirma", headers=owner).status_code == 200
+
+        revokes = [c for c in fake.calls if c[1] == "revoke_guest_code"]
+        assert revokes == [("hemnyckel", "revoke_guest_code",
+                            {"slot": 6, "entry_id": "ent-front"})]
+        names = [p["name"] for p in client.get("/api/people", headers=owner).json()["people"]]
+        assert "Städfirma" not in names
+        assert app.state.hmk.store.guest_life("Städfirma") is None
+
+
+def test_a_guest_whose_code_cannot_be_cleared_stays(cfg):
+    """A forgotten guest with a live code is worse than a visible one."""
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"],
+        })
+
+        fake.ok = False
+        response = client.delete("/api/people/Städfirma", headers=owner)
+
+        assert response.status_code == 502
+        assert app.state.hmk.store.guest_life("Städfirma") is not None
+        names = [p["name"] for p in client.get("/api/people", headers=owner).json()["people"]]
+        assert "Städfirma" in names
+
+
+def test_a_guest_with_a_device_is_removed_from_the_device_screen(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite = guest_invite(client, owner, name="Margareta")
+        client.post("/api/pair", json={"code": invite["code"], "name": "Margareta"})
+
+        response = client.delete("/api/people/Margareta", headers=owner)
+
+        assert response.status_code == 409
+        assert "device" in response.json()["detail"]

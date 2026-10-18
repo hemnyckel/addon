@@ -1,5 +1,19 @@
 # Ändringar
 
+## 0.10.10
+
+- **Gäster är personer i Personer.** En gäst finns från det att livet skrivs —
+  även om ingen telefon någonsin parkopplas. Tidigare byggdes Personer bara av
+  parkopplade enheter, så en inbjuden gäst utan telefon försvann ur listan och
+  gick inte att redigera, trots att koden fanns i låset. Nu visas gästen med
+  rollen **Gäst**, sin dörr, dag, tid och sitt slutdatum — och kan redigeras där.
+- **En kod under Nycklar blir också en gäst.** `POST /guest-codes` sparar
+  gästens liv och platser, så städfirman dyker upp i Personer och schemat kan
+  ändras i efterhand.
+- **Ta bort en gäst utan telefon:** `DELETE /people/{person}` rensar låskoderna
+  först och vägrar om en dörr inte svarar. En gäst med telefon tas bort via sin
+  enhet, som förut.
+
 ## 0.10.9
 
 - **En misslyckad dörr kan skrivas om med samma kod.** `POST /guest-codes` tar

@@ -1504,6 +1504,30 @@ class State:
             if not ok:
                 _LOGGER.warning("revoke: door %s slot %s not reached", door_id, slot)
 
+    async def revoke_person_codes(self, person: str) -> list[str]:
+        """Clear every lock code a person holds, best-effort.
+
+        For a guest without a phone there is no device to revoke, so the
+        person's own registry and every invitation that carried their slots are
+        the sources. Returns the doors that could not be reached: a guest is
+        never forgotten while a code is still live on a lock.
+        """
+        slots: dict[str, int] = {}
+        for invite in self.store.invites_for_person(person):
+            slots.update(_json_map(invite["slots"]))
+        slots.update(self.store.guest_slots(person))
+        failed: list[str] = []
+        for door_id, slot in slots.items():
+            if self.cfg.door(door_id) is None:
+                continue
+            if not await self.revoke_lock_guest(door_id, int(slot)):
+                failed.append(door_id)
+        if not failed:
+            for invite in self.store.invites_for_person(person):
+                self.store.clear_invite_slots(str(invite["code"]))
+            self.store.set_guest_slots(person, {})
+        return failed
+
     # -- editing a guest: the person, and the codes on every lock -------------
     async def guest_kind(self, door_id: str, slot: int) -> str | None:
         """The integration's kind for a guest slot, read live, or None.
@@ -1585,7 +1609,7 @@ class State:
         recreated, because the integration cannot change that in place. A fresh
         code is returned once, exactly like an invitation's.
         """
-        group = next((g for g in self.store.people() if g.get("name") == person), None)
+        group = next((g for g in self.store.directory() if g.get("name") == person), None)
         if group is None:
             raise HTTPException(404, "unknown person")
         old_doors = sorted(str(d) for d in (group.get("doors") or []))
@@ -1604,6 +1628,8 @@ class State:
             if invite is not None:
                 existing.update(_json_map(invite["slots"]))
         existing.update(self.store.guest_slots(person))
+        for invite in self.store.invites_for_person(person):
+            existing.update(_json_map(invite["slots"]))
 
         schedule_changed = days != old_days or (
             bool(days) and (from_time, to_time) != (old_from, old_to)
@@ -2023,7 +2049,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         """
         if device.get("role") == "guest":
             return {"people": []}
-        people = state.store.people()
+        people = state.store.directory()
         if device.get("role") != "owner":
             people = [
                 {"id": p["id"], "name": p["name"], "role": p["role"], "avatar": p["avatar"]}
@@ -2135,7 +2161,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         code that can be changed in place is; otherwise it is revoked and
         recreated with the new window and returned once.
         """
-        group = next((g for g in state.store.people() if g.get("name") == person), None)
+        group = next((g for g in state.store.directory() if g.get("name") == person), None)
         if group is None:
             raise HTTPException(404, "unknown person")
         if group.get("role") != "guest":
@@ -2167,6 +2193,33 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             person, name=name, doors=doors, days=days,
             from_time=from_time, to_time=to_time, expires=expires,
         )
+
+    @api.delete("/people/{person}")
+    async def delete_person(person: str,
+                            _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Remove a guest who has no phone of their own.
+
+        The lock codes are cleared first. If a door cannot be reached the guest
+        stays: a forgotten guest with a live code is worse than a visible one.
+        A guest who has a device is removed from that device's own screen.
+        """
+        group = next(
+            (g for g in state.store.directory() if g.get("name") == person), None
+        )
+        if group is None:
+            raise HTTPException(404, "unknown person")
+        if group.get("role") != "guest":
+            raise HTTPException(409, "only a guest can be removed here")
+        if group.get("devices"):
+            raise HTTPException(409, "remove the guest's device instead")
+        failed = await state.revoke_person_codes(person)
+        if failed:
+            raise HTTPException(
+                502, f"the code could not be cleared on {', '.join(failed)}"
+            )
+        state.store.remove_guest(person)
+        _LOGGER.info("Guest %s removed", person)
+        return {"ok": True, "person": person}
 
     @api.get("/devices")
     async def list_devices(_: dict = Depends(require_owner)) -> dict[str, Any]:
@@ -2259,6 +2312,15 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 })
         state.store.add_invite(code, name, role, doors, days, from_time, to_time,
                                expires, slots=slots)
+        if role == "guest":
+            # The guest exists from now, paired or not: Personer can show and
+            # edit their life without waiting for a phone to redeem the code.
+            state.store.set_guest_life(
+                name, doors, days, from_time, to_time, expires
+            )
+            known_slots = dict(state.store.guest_slots(name))
+            known_slots.update(slots)
+            state.store.set_guest_slots(name, known_slots)
         _LOGGER.info("Invite for %s (%s): %s", name, role, code)
         return {"code": code, "role": role, "expires_at": expires,
                 "doors": doors, "days": days, "guest_codes": guest_codes,
@@ -2412,6 +2474,18 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 "error": None if created else "the lock did not take the code",
             })
         accepted = [row for row in rows if row["ok"]]
+        if accepted:
+            # Remember what the person holds, and give them a life: a code made
+            # under Nycklar is a guest too, and must show up in Personer where
+            # its schedule and end date can be edited.
+            slots = dict(state.store.guest_slots(name))
+            for row in accepted:
+                if row["slot"] is not None:
+                    slots[str(row["door"])] = int(row["slot"])
+            state.store.set_guest_slots(name, slots)
+            state.store.set_guest_life(
+                name, doors, days, from_time, to_time, expires
+            )
         _LOGGER.info(
             "Guest code for %s written to %s of %s door(s)",
             name, len(accepted), len(rows),
