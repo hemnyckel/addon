@@ -970,7 +970,7 @@ def test_editing_a_guest_is_guarded_and_validated(cfg):
         assert client.post("/api/people/Stad/guest", headers=owner, json=edit_body(
             "Stad", expires_at=time.time() - 10)).status_code == 400
         assert client.post("/api/people/Stad/guest", headers=owner, json=edit_body(
-            "Stad", expires_at=time.time() + 400 * 86400)).status_code == 400
+            "Stad", expires_at=time.time() + 6 * 366 * 86400)).status_code == 400
         # A rename onto another person's name is refused, not merged.
         assert client.post("/api/people/Stad/guest", headers=owner,
                            json=edit_body("Bo")).status_code == 409
@@ -1674,3 +1674,22 @@ def test_a_duplicate_person_name_is_refused(cfg):
                            json={"name": "Bella"}).status_code == 409
         assert client.post("/api/people", headers=owner,
                            json={"name": "  "}).status_code == 400
+
+
+def test_a_guest_can_last_longer_than_a_year(cfg):
+    """A cleaner's contract may run past twelve months; the cap is five years."""
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        expires = time.time() + 2 * 366 * 86400
+        result = client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"], "expires_at": expires,
+        }).json()
+
+        assert result["ok"] is True
+        life = app.state.hmk.store.guest_life("Städfirma")
+        assert abs(float(life["expires"]) - expires) < 0.01

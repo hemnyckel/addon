@@ -56,6 +56,10 @@ _AUTO_METHOD = "Automatiskt"
 # Pairing is the only unauthenticated endpoint, and the relay may be reachable
 # from the internet through a reverse proxy: bound the attempts per client.
 _PAIR_MAX_ATTEMPTS = 10
+
+# How far ahead a guest's access may end. A year was too short for a cleaner's
+# contract; five years still catches a typo (a date in 2127).
+_MAX_ACCESS_SECONDS = 5 * 366 * 86400
 _PAIR_WINDOW = 60
 # How long a pairing code stays valid.
 _PAIR_TTL = 600
@@ -2286,8 +2290,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "expires_at is required") from None
         now = time.time()
-        if not now < expires <= now + 366 * 86400:
-            raise HTTPException(400, "expires_at must be within the next year")
+        if not now < expires <= now + _MAX_ACCESS_SECONDS:
+            raise HTTPException(400, "expires_at must be within the next five years")
         return await state.edit_guest_life(
             person, name=name, doors=doors, days=days,
             from_time=from_time, to_time=to_time, expires=expires,
@@ -2391,8 +2395,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "expires_at is required") from None
         now = time.time()
-        if not now < expires <= now + 366 * 86400:
-            raise HTTPException(400, "expires_at must be within the next year")
+        if not now < expires <= now + _MAX_ACCESS_SECONDS:
+            raise HTTPException(400, "expires_at must be within the next five years")
 
         code = secrets.token_hex(3).upper()
         # A guest is one identity: write the SAME code on each chosen door
@@ -2589,9 +2593,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                         400, "expires_at must be a timestamp"
                     ) from None
                 now = time.time()
-                if not now < expires <= now + 366 * 86400:
+                if not now < expires <= now + _MAX_ACCESS_SECONDS:
                     raise HTTPException(
-                        400, "expires_at must be within the next year"
+                        400, "expires_at must be within the next five years"
                     )
 
         failed_clear = await state.revoke_person_codes(person)
@@ -2744,7 +2748,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         """
         # Temporary diagnostics for the app's create-person flow. The PIN is
         # never in the payload of a first attempt; keep it out regardless.
-        _LOGGER.info(
+        _LOGGER.debug(
             "guest-codes request: %s",
             {k: v for k, v in payload.items() if k != "code"},
         )
@@ -2769,8 +2773,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             except (TypeError, ValueError):
                 raise HTTPException(400, "expires_at must be a timestamp") from None
             now = time.time()
-            if not now < expires <= now + 366 * 86400:
-                raise HTTPException(400, "expires_at must be within the next year")
+            if not now < expires <= now + _MAX_ACCESS_SECONDS:
+                raise HTTPException(400, "expires_at must be within the next five years")
 
         code = str(payload.get("code") or "").strip() or _guest_code()
         if not (code.isdigit() and 4 <= len(code) <= 8):
