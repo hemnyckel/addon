@@ -1,5 +1,16 @@
 # Ändringar
 
+## 0.10.8
+
+- **En kod till alla dörrar.** En gäst har nu en enda kod, som skrivs identiskt
+  till varje vald dörr — även när en redigering tvingar fram en ny kod byts den
+  på alla dörrar samtidigt. Städfirman behöver aldrig hålla reda på olika koder
+  per dörr.
+- **Nytt `POST /guest-codes`** — en kod till flera dörrar utan inbjudan och utan
+  app: namn, dörrar, valfria dagar/tider och slutdatum. Svaret är ett resultat
+  per dörr, så appen kan visa exakt vilka dörrar som fick koden och vilka som
+  inte gjorde det.
+
 ## 0.10.7
 
 - **Lås: en långsam låsoperation kraschar inte längre reläet.** Ett anrop till

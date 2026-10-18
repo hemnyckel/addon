@@ -177,20 +177,22 @@ DELETE /devices/<id>             # owner only
 ```
 
 A guest invitation is **one identity**. Besides the redemption code, the relay
-writes a matching guest code on **each chosen door** through the integration:
-`hemnyckel.create_recurring_guest` when the invitation names weekdays (ISO,
-Monday = 1, mapped to the integration's lowercase three-letter day codes with
-`start`/`end` times), otherwise `hemnyckel.create_guest_code` with the
-invitation's expiry. The guest's name rides on the slot, so a keypad entry
-attributes to them; an invitation with no doors chosen covers every door, and a
-door whose lock cannot be reached gets no code without failing the invitation.
+writes a **single guest code, identical on every chosen door**, through the
+integration: `hemnyckel.create_recurring_guest` when the invitation names
+weekdays (ISO, Monday = 1, mapped to the integration's lowercase three-letter
+day codes with `start`/`end` times), otherwise `hemnyckel.create_guest_code`
+with the invitation's expiry. The same digits are passed explicitly as `code`
+to every door, so the guest never has to remember which code belongs to which
+door. The guest's name rides on the slot, so a keypad entry attributes to them;
+an invitation with no doors chosen covers every door, and a door whose lock
+cannot be reached gets no code without failing the invitation.
 
 `guest_codes` carries the created code(s) **once**, each with the door they
-belong to. The relay never logs or stores a code — only the slot numbers, so the
-codes can be revoked later. Revoking the guest device, or refusing an expired
-guest, revokes those lock codes best-effort; a door that is unreachable never
-fails the revocation. A guest who *does* install the app redeems `code` (and
-scans its QR) exactly as before.
+belong to — all carrying the same digits. The relay never logs or stores a code
+— only the slot numbers, so the codes can be revoked later. Revoking the guest
+device, or refusing an expired guest, revokes those lock codes best-effort; a
+door that is unreachable never fails the revocation. A guest who *does* install
+the app redeems `code` (and scans its QR) exactly as before.
 
 A guest device:
 
@@ -339,7 +341,28 @@ DELETE /slots/6/finger?door=front
 
 DELETE /slots/6?door=front
   -> 200 { "ok": true, "slot": 6 }
+
+POST /guest-codes                 # owner only, no invitation and no device
+  { "name": "Städfirma", "doors": ["front", "back"],
+    "days": [5], "from_time": "07:45", "to_time": "12:00",
+    "expires_at": 1758... }
+  -> 200 { "ok": true, "code": "482913", "failed": [],
+           "doors": [ { "door": "front", "door_name": "Ytterdörren",
+                        "slot": 6, "until": null, "ok": true, "error": null },
+                      { "door": "back", "door_name": "Källardörren",
+                        "slot": 7, "until": null, "ok": true, "error": null } ] }
+  -> 200 { "ok": false, "code": null, "failed": ["back"],
+           "doors": [ … ] }       # no lock took the code; nothing to show
+  -> 400 a name is required / choose at least one door / times must be HH:MM
 ```
+
+One guest code, written to **every chosen door**. This is the cleaner's case:
+there is no pairing code and no device — the code on the lock is the whole
+access. `days`, `from_time`, `to_time` and `expires_at` are optional; weekdays
+make it a recurring guest whose window the integration enforces. The response is
+a per-door result rather than an exception, so the app can say exactly which
+doors took the code and which did not. The code is returned **once** and never
+stored by the relay.
 
 `fingers` and `finger_state` are passed through from Home Assistant's slots
 sensor unchanged: the integration owns the labels and the policy, and the relay

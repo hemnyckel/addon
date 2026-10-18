@@ -188,6 +188,17 @@ def _iso_until(expires: float) -> str:
     return datetime.fromtimestamp(expires, tz=UTC).isoformat()
 
 
+def _guest_code() -> str:
+    """One six-digit code, generated once per guest - never once per door.
+
+    The same digits are written to every door the guest may use, so a cleaner
+    never has to remember which code belongs to which door. The value is never
+    logged or stored here; the integration keeps it only for a recurring
+    guest's window, and the app shows it exactly once.
+    """
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
 def _schedule_ok(device: dict[str, Any], when: float) -> bool:
     """A guest's access window: chosen weekdays and times (empty means any)."""
     if device.get("role") != "guest":
@@ -1398,49 +1409,56 @@ class State:
     # -- guest identity: one invitation, matching codes on each door ----------
     async def create_lock_guest(self, door_id: str, name: str, days: list[int],
                                 from_time: str | None, to_time: str | None,
-                                expires: float) -> dict[str, Any] | None:
-        """Write a matching guest code on one door, best-effort.
+                                expires: float | None,
+                                code: str | None = None) -> dict[str, Any] | None:
+        """Write the guest's code on one door, best-effort.
 
         Weekdays mean a recurring guest (the integration enforces the window);
-        without them, a simple guest that expires with the invitation. The
-        name rides on the slot, so a later keypad event attributes to the person.
+        without them, a simple guest. The name rides on the slot, so a later
+        keypad event attributes to the person. ``code`` is the guest's one code
+        - the caller generates it once and passes the same digits here for every
+        door, so the household never ends up with different codes per door.
 
         Returns ``{"slot", "code", "until"}`` or None when this door's lock
         cannot take it — the invitation still stands, so an unreachable lock
         never blocks it. The code is returned to the caller once and is never
-        logged or stored.
+        logged or stored here.
         """
         try:
             entry_id = await self.slot_entry_id(door_id)
         except HTTPException as err:
-            _LOGGER.warning("invite %s: no slot table for door %s (%s)",
+            _LOGGER.warning("guest %s: no slot table for door %s (%s)",
                             name, door_id, err.detail)
             return None
+        until = _iso_until(expires) if expires is not None else None
         if days:
             service = "create_recurring_guest"
             data: dict[str, Any] = {
                 "name": name,
                 "schedule": [_schedule_window(days, from_time, to_time)],
-                # The end date travels with the code whatever its kind: a weekly
-                # window must not let a cleaner's code outlive the arrangement.
-                "until": _iso_until(expires),
                 "entry_id": entry_id,
             }
         else:
             service = "create_guest_code"
-            data = {"name": name, "entry_id": entry_id, "until": _iso_until(expires)}
+            data = {"name": name, "entry_id": entry_id}
+        if until is not None:
+            # The end date travels with the code whatever its kind: a weekly
+            # window must not let a cleaner's code outlive the arrangement.
+            data["until"] = until
+        if code:
+            data["code"] = code
         ok, response = await self.ha.call_service_result("hemnyckel", service, data)
         if not ok:
-            _LOGGER.warning("invite %s: %s refused on door %s", name, service, door_id)
+            _LOGGER.warning("guest %s: %s refused on door %s", name, service, door_id)
             return None
         row = _service_row(response, entry_id)
-        code = str((row or {}).get("code") or "")
+        created = str((row or {}).get("code") or "")
         slot = (row or {}).get("slot")
-        if not code or slot is None:
-            _LOGGER.warning("invite %s: %s returned no code for door %s",
+        if not created or slot is None:
+            _LOGGER.warning("guest %s: %s returned no code for door %s",
                             name, service, door_id)
             return None
-        return {"slot": int(slot), "code": code, "until": (row or {}).get("until")}
+        return {"slot": int(slot), "code": created, "until": (row or {}).get("until")}
 
     async def revoke_invite_codes(self, device_id: str) -> None:
         """Remove the lock codes a guest holds, best-effort.
@@ -1598,6 +1616,28 @@ class State:
         new_slots: dict[str, int] = {}
         codes: list[dict[str, Any]] = []
         failed: list[str] = []
+
+        # Does any desired door need a new code? A door whose code can be kept
+        # (same kind, same end date) is updated in place. But the guest has ONE
+        # code, so the moment one door must be rewritten every desired door is
+        # rewritten with the same digits - otherwise the household drifts back
+        # into a different code per door.
+        rewrite: set[str] = set()
+        for door_id in desired:
+            if self.cfg.door(door_id) is None:
+                continue
+            slot = existing.get(door_id)
+            if slot is None:
+                rewrite.add(door_id)
+                continue
+            target_kind = "recurring" if days else "simple"
+            kind = await self.guest_kind(door_id, slot)
+            if until_changed or kind != target_kind:
+                rewrite.add(door_id)
+        shared_code = _guest_code() if rewrite else None
+        if rewrite:
+            rewrite = {door_id for door_id in desired if self.cfg.door(door_id) is not None}
+
         for door_id in dict.fromkeys([*existing, *doors]):
             if self.cfg.door(door_id) is None:
                 continue  # a door that is no longer configured
@@ -1609,31 +1649,26 @@ class State:
                     new_slots[door_id] = slot
                     failed.append(door_id)
                 continue
-            if slot is None:
-                created = await self.create_lock_guest(
-                    door_id, name, days, from_time, to_time, expires
-                )
-                if created is None:
-                    failed.append(door_id)
+            if slot is not None and door_id not in rewrite:
+                if await self.update_lock_guest(door_id, slot, name, days,
+                                                from_time, to_time):
+                    new_slots[door_id] = slot
                     continue
-                new_slots[door_id] = int(created["slot"])
-                codes.append(self._code_row(door_id, created))
-                continue
-            target_kind = "recurring" if days else "simple"
-            kind = await self.guest_kind(door_id, slot)
-            if (not until_changed and kind == target_kind
-                    and await self.update_lock_guest(door_id, slot, name, days,
-                                                     from_time, to_time)):
+                # The in-place update failed. Rotating everyone now would mean
+                # rewriting doors already handled, so the honest answer is that
+                # this door did not move; the old code is still the guest's.
                 new_slots[door_id] = slot
+                failed.append(door_id)
                 continue
             # The code has to change but the old one must go first: if it will
             # not clear, keep it and say so rather than leaving two codes.
-            if not await self.revoke_lock_guest(door_id, slot):
+            if slot is not None and not await self.revoke_lock_guest(door_id, slot):
                 new_slots[door_id] = slot
                 failed.append(door_id)
                 continue
             created = await self.create_lock_guest(
-                door_id, name, days, from_time, to_time, expires
+                door_id, name, days, from_time, to_time, expires,
+                code=shared_code,
             )
             if created is None:
                 failed.append(door_id)
@@ -2192,21 +2227,26 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             raise HTTPException(400, "expires_at must be within the next year")
 
         code = secrets.token_hex(3).upper()
-        # A guest is one identity: write a matching code on each chosen door
-        # (all doors when the invitation named none), so the same person can
-        # type a code at the door and redeem the invitation in the app.
+        # A guest is one identity: write the SAME code on each chosen door
+        # (all doors when the invitation named none), so the same digits work
+        # everywhere and nobody has to remember a per-door code.
         guest_codes: list[dict[str, Any]] = []
         slots: dict[str, int] = {}
+        failed_doors: list[str] = []
         if role == "guest":
+            guest_code = _guest_code()
             for door_id in doors or [d.id for d in cfg.doors]:
                 try:
                     created = await state.create_lock_guest(
-                        door_id, name, days, from_time, to_time, expires
+                        door_id, name, days, from_time, to_time, expires,
+                        code=guest_code,
                     )
                 except Exception as err:  # noqa: BLE001 - a lock must not break the invite
                     _LOGGER.warning("invite %s: door %s failed: %s", name, door_id, err)
+                    failed_doors.append(door_id)
                     continue
                 if created is None:
+                    failed_doors.append(door_id)
                     continue
                 door = cfg.door(door_id)
                 slots[door_id] = int(created["slot"])
@@ -2221,7 +2261,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                                expires, slots=slots)
         _LOGGER.info("Invite for %s (%s): %s", name, role, code)
         return {"code": code, "role": role, "expires_at": expires,
-                "doors": doors, "days": days, "guest_codes": guest_codes}
+                "doors": doors, "days": days, "guest_codes": guest_codes,
+                "failed": failed_doors}
 
     @api.delete("/devices/{device_id}")
     async def revoke_device(device_id: str,
@@ -2314,6 +2355,68 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "name": str((created or {}).get("name") or name),
             "until": (created or {}).get("until"),
             "code": code,
+        }
+
+    @api.post("/guest-codes")
+    async def create_guest_codes(payload: dict[str, Any],
+                                 _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """One code, written to every chosen door, without an invitation.
+
+        This is the cleaner's case: one person, one code, several doors. There
+        is no pairing code and no device - the code on the lock is the whole
+        access. The code is returned once and never stored by the relay; every
+        door gets the same digits, so nobody has to remember which code belongs
+        to which door.
+        """
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "a name is required")
+        doors = [str(d) for d in (payload.get("doors") or [])
+                 if cfg.door(str(d)) is not None]
+        if not doors:
+            raise HTTPException(400, "choose at least one door")
+        days = sorted({int(d) for d in (payload.get("days") or [])
+                       if str(d).isdigit() and 1 <= int(d) <= 7})
+        from_time = str(payload.get("from_time") or "") or None
+        to_time = str(payload.get("to_time") or "") or None
+        if (from_time and _parse_hhmm(from_time) is None) or \
+                (to_time and _parse_hhmm(to_time) is None):
+            raise HTTPException(400, "times must be HH:MM")
+        expires: float | None = None
+        if payload.get("expires_at") is not None:
+            try:
+                expires = float(payload["expires_at"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, "expires_at must be a timestamp") from None
+            now = time.time()
+            if not now < expires <= now + 366 * 86400:
+                raise HTTPException(400, "expires_at must be within the next year")
+
+        code = _guest_code()
+        rows: list[dict[str, Any]] = []
+        for door_id in dict.fromkeys(doors):
+            door = cfg.door(door_id)
+            created = await state.create_lock_guest(
+                door_id, name, days, from_time, to_time, expires, code=code
+            )
+            rows.append({
+                "door": door_id,
+                "door_name": door.name if door is not None else door_id,
+                "slot": int(created["slot"]) if created else None,
+                "until": created.get("until") if created else None,
+                "ok": created is not None,
+                "error": None if created else "the lock did not take the code",
+            })
+        accepted = [row for row in rows if row["ok"]]
+        _LOGGER.info(
+            "Guest code for %s written to %s of %s door(s)",
+            name, len(accepted), len(rows),
+        )
+        return {
+            "ok": bool(accepted),
+            "code": code if accepted else None,
+            "doors": rows,
+            "failed": [row["door"] for row in rows if not row["ok"]],
         }
 
     @api.post("/slots/{slot}/finger")

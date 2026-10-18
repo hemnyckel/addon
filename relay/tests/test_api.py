@@ -535,7 +535,15 @@ class FakeHa:
         self.calls.append((domain, service, data))
         if service in self.responses:
             return self.ok, self.responses[service]
-        return self.ok, self.response
+        response = self.response
+        # The integration writes the code it is given; mirror that so a test can
+        # tell one guest code from a per-door lottery.
+        if isinstance(response, dict) and data.get("code"):
+            response = {
+                key: ({**value, "code": data["code"]} if isinstance(value, dict) else value)
+                for key, value in response.items()
+            }
+        return self.ok, response
 
 
 def guest_sensor_states(*doors: tuple[str, str, str]) -> list[dict]:
@@ -596,6 +604,10 @@ def test_a_guest_invitation_writes_a_code_on_each_chosen_door(cfg):
         assert fake.calls[0][2]["schedule"] == [
             {"days": ["mon", "wed"], "start": "08:00", "end": "17:00"}
         ]
+        # ONE code, given to every door: the cleaner must not have to remember
+        # which code belongs to which door.
+        assert fake.calls[0][2]["code"] == fake.calls[1][2]["code"]
+        assert invite["guest_codes"][0]["code"] == invite["guest_codes"][1]["code"]
         # …and the arrangement's end date travels with it, so a weekly window
         # cannot leave the cleaner's code on the lock for ever.
         until = fake.calls[0][2]["until"]
@@ -603,12 +615,13 @@ def test_a_guest_invitation_writes_a_code_on_each_chosen_door(cfg):
             invite["expires_at"], UTC
         ).isoformat()
 
-        # The codes come back once, each with its door…
+        # The code comes back once, with every door it was written to…
+        written = fake.calls[0][2]["code"]
         assert invite["guest_codes"] == [
             {"door": "front", "door_name": "Ytterdörren", "slot": 6,
-             "code": "111111", "until": None},
+             "code": written, "until": None},
             {"door": "back", "door_name": "Källardörren", "slot": 7,
-             "code": "222222", "until": None},
+             "code": written, "until": None},
         ]
         # …and only the slots are stored, never a code.
         stored = dict(app.state.hmk.store.invite(invite["code"]))
@@ -633,7 +646,7 @@ def test_a_guest_invitation_without_weekdays_writes_a_simple_code(cfg):
         assert service == "create_guest_code"
         assert data["until"] == datetime.fromtimestamp(expires, tz=UTC).isoformat()
         assert data["entry_id"] == "ent-front"
-        assert invite["guest_codes"][0]["code"] == "123456"
+        assert invite["guest_codes"][0]["code"] == data["code"]
 
 
 def test_a_door_whose_lock_is_unreachable_does_not_break_the_invitation(cfg):
@@ -648,6 +661,7 @@ def test_a_door_whose_lock_is_unreachable_does_not_break_the_invitation(cfg):
 
         assert response.status_code == 200
         assert response.json()["guest_codes"] == []
+        assert response.json()["failed"] == ["front"]
         assert app.state.hmk.store.invite(response.json()["code"])["slots"] is None
 
 
@@ -765,9 +779,9 @@ def test_editing_a_recurring_guest_updates_the_schedule_in_place(cfg):
 
         assert body["changed"] == ["days"]
         assert body["guest_codes"] == []            # the code survived
-        assert [c[1] for c in fake.calls] == ["list_guests", "update_guest",
-                                              "list_guests", "update_guest"]
-        assert fake.calls[1][2]["schedule"] == [
+        assert [c[1] for c in fake.calls] == ["list_guests", "list_guests",
+                                              "update_guest", "update_guest"]
+        assert fake.calls[2][2]["schedule"] == [
             {"days": ["tue"], "start": "09:00", "end": "10:00"}
         ]
         assert hmk.store.guest_slots("Stad") == {"front": 6, "back": 7}
@@ -798,7 +812,7 @@ def test_turning_a_simple_guest_recurring_recreates_the_code(cfg):
         ]
         assert body["guest_codes"] == [{
             "door": "front", "door_name": "Ytterdörren", "slot": 5,
-            "code": "123456", "until": None,
+            "code": fake.calls[-1][2]["code"], "until": None,
         }]
         assert hmk.store.guest_slots("Stad") == {"front": 5}
 
@@ -1118,3 +1132,109 @@ def test_the_energy_window_is_an_owner_setting(cfg):
         # A length a machine cannot run in is clamped, never obeyed blindly.
         assert client.post("/api/energy/window", headers=owner,
                            json={"minutes": 5}).json()["minutes"] == 15
+
+
+def test_a_guest_code_is_written_once_to_every_chosen_door(cfg):
+    """The cleaner's case: one code, several doors, no invitation.
+
+    No pairing code and no device - the code on the lock is the whole access.
+    The same digits are written to every chosen door, and the response carries
+    the per-door result so the app can say exactly what happened.
+    """
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front"),
+                                   ("back", "Källardörren", "ent-back")),
+        response={"ent-front": {"slot": 6, "code": "111111"},
+                  "ent-back": {"slot": 7, "code": "222222"}},
+    )
+    app = guest_client(cfg, fake, two_doors=True)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        result = client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front", "back"],
+            "days": [5], "from_time": "07:45", "to_time": "12:00",
+            "expires_at": time.time() + 7 * 86400,
+        }).json()
+
+        assert [c[1] for c in fake.calls] == [
+            "create_recurring_guest", "create_recurring_guest",
+        ]
+        assert fake.calls[0][2]["code"] == fake.calls[1][2]["code"]
+        assert result["ok"] is True
+        assert result["code"] == fake.calls[0][2]["code"]
+        assert result["failed"] == []
+        assert [(row["door"], row["ok"], row["slot"]) for row in result["doors"]] == [
+            ("front", True, 6), ("back", True, 7),
+        ]
+
+
+def test_a_guest_code_that_no_lock_takes_returns_no_code(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        ok=False,
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        result = client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"],
+            "expires_at": time.time() + 86400,
+        }).json()
+
+        assert result["ok"] is False
+        assert result["code"] is None
+        assert result["failed"] == ["front"]
+        assert result["doors"][0]["error"]
+
+
+def test_only_an_owner_creates_a_guest_code(cfg):
+    fake = FakeHa(states=guest_sensor_states(("front", "Ytterdörren", "ent-front")))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        pair_owner(client, hmk)
+        user = {"Authorization": "Bearer " + client.post(
+            "/api/pair", json={"code": hmk.pair_code, "name": "User"}).json()["device_token"]}
+
+        assert client.post("/api/guest-codes", headers=user, json={
+            "name": "Städfirma", "doors": ["front"],
+        }).status_code == 403
+        assert fake.calls == []
+
+
+def test_an_edit_that_moves_the_end_date_rewrites_every_door_with_one_code(cfg):
+    """One code is the guest's code: it cannot move on one door and stay on another."""
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front"),
+                                   ("back", "Källardörren", "ent-back")),
+        response={"ent-front": {"slot": 6, "code": "111111"},
+                  "ent-back": {"slot": 7, "code": "222222"}},
+        responses={"list_guests": {
+            "ent-front": [{"slot": 6, "kind": "recurring"}],
+            "ent-back": [{"slot": 7, "kind": "recurring"}],
+        }},
+    )
+    app = guest_client(cfg, fake, two_doors=True)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite, _token = paired_guest(
+            client, hmk, owner, doors=["front", "back"],
+            days=[5], from_time="07:45", to_time="12:00",
+        )
+
+        fake.calls.clear()
+        body = client.post("/api/people/Stad/guest", headers=owner, json={
+            "name": "Stad", "doors": ["front", "back"],
+            "days": [5], "from_time": "07:45", "to_time": "12:00",
+            "expires_at": invite["expires_at"] + 86400,
+        }).json()
+
+        assert [c[1] for c in fake.calls] == [
+            "list_guests", "list_guests",
+            "revoke_guest_code", "create_recurring_guest",
+            "revoke_guest_code", "create_recurring_guest",
+        ]
+        codes = [c[2]["code"] for c in fake.calls if c[1] == "create_recurring_guest"]
+        assert codes[0] == codes[1] == body["guest_codes"][0]["code"]
+        assert body["guest_codes"][0]["code"] == body["guest_codes"][1]["code"]
