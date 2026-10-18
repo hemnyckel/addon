@@ -1404,3 +1404,122 @@ def test_a_guest_with_a_device_is_removed_from_the_device_screen(cfg):
 
         assert response.status_code == 409
         assert "device" in response.json()["detail"]
+
+
+# -- access without the app: slot names are people too -----------------------
+
+def slot_states(*rows: tuple[str, str, str, list[dict]]):
+    """One slots sensor per door with the given rows, for access-only people."""
+    return [
+        {
+            "entity_id": f"sensor.{door_id}_slots",
+            "state": "1 occupied",
+            "attributes": {
+                "lock": name,
+                "entry_id": entry,
+                "slots": [
+                    {
+                        "slot": row["slot"],
+                        "name": row["name"],
+                        "has_pin": False,
+                        "has_fingerprint": True,
+                        "has_rfid": False,
+                        "finger_used": True,
+                        "finger_state": "confirmed",
+                        "fingers": [],
+                        "credentials": row["credentials"],
+                    }
+                    for row in slot_rows
+                ],
+            },
+        }
+        for door_id, name, entry, slot_rows in rows
+    ]
+
+
+def test_a_fingerprint_only_person_is_a_person_without_the_app(cfg):
+    fake = FakeHa(states=slot_states(
+        ("front", "Ytterdörren", "ent-front",
+         [{"slot": 11, "name": "Bella", "credentials": ["fingerprint"]}]),
+        ("back", "Källardörren", "ent-back",
+         [{"slot": 11, "name": "Bella", "credentials": ["fingerprint"]}]),
+    ))
+    app = guest_client(cfg, fake, two_doors=True)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        people = client.get("/api/people", headers=owner).json()["people"]
+
+        bella = next(p for p in people if p["name"] == "Bella")
+        assert bella["role"] == "user"
+        assert bella["access_only"] is True
+        assert bella["devices"] == []
+        assert bella["doors"] == ["back", "front"]
+        assert bella["credentials"] == ["fingerprint"]
+
+
+def test_a_person_without_the_app_gets_a_pairing_code_and_no_lock_writes(cfg):
+    fake = FakeHa(states=slot_states(
+        ("front", "Ytterdörren", "ent-front",
+         [{"slot": 11, "name": "Bella", "credentials": ["fingerprint"]}]),
+    ))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        fake.calls.clear()
+        result = client.post("/api/people/Bella/invite", headers=owner).json()
+
+        assert result["role"] == "user"
+        assert result["guest_codes"] == []
+        assert fake.calls == []  # the locks are untouched
+        invite = app.state.hmk.store.invite(result["code"])
+        assert invite["name"] == "Bella"
+        assert invite["role"] == "user"
+        assert invite["slots"] is None
+
+        people = client.get("/api/people", headers=owner).json()["people"]
+        bella = next(p for p in people if p["name"] == "Bella")
+        assert bella["id"]  # an identity, so her icon can be set too
+
+
+def test_a_guest_pairs_to_the_life_it_already_has(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        expires = time.time() + 7 * 86400
+        client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"], "days": [5],
+            "from_time": "07:45", "to_time": "12:00", "expires_at": expires,
+        })
+
+        fake.calls.clear()
+        result = client.post("/api/people/Städfirma/invite", headers=owner).json()
+
+        assert result["role"] == "guest"
+        assert result["doors"] == ["front"]
+        assert result["days"] == [5]
+        assert abs(result["expires_at"] - expires) < 1
+        assert fake.calls == []  # no second code, no rotation
+        invite = app.state.hmk.store.invite(result["code"])
+        assert invite["slots"] is None
+
+
+def test_a_person_who_already_has_the_app_is_not_invited_again(cfg):
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "111111"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        hmk = app.state.hmk
+        owner = pair_owner(client, hmk)
+        invite = guest_invite(client, owner, name="Margareta")
+        client.post("/api/pair", json={"code": invite["code"], "name": "Margareta"})
+
+        response = client.post("/api/people/Margareta/invite", headers=owner)
+
+        assert response.status_code == 409
+        assert "already has the app" in response.json()["detail"]

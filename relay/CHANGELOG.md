@@ -1,5 +1,17 @@
 # Ändringar
 
+## 0.10.12
+
+- **Personer visar även den som bara har åtkomst i låset.** Ett namn på en
+  finger-, PIN- eller RFID-plats är en person, även utan app. Reläet läser
+  slot-tabellen och visar dem som *Ingen app* med dörrar och typ av åtkomst —
+  de rör inte låset och behöver ingen inbjudan för att finnas.
+- **`POST /people/{person}/invite` — ren parningskod till en befintlig person.**
+  Inga låskoder skapas eller roteras. En gäst ärver sitt liv (dörrar, dagar,
+  tider, slutdatum) och en familjemedlem blir `user` när telefonen parkopplas.
+  Personen behåller finger, kod, historik och ikon. Bara en levande
+  parningskod per person; en ny ogiltigförklarar den gamla.
+
 ## 0.10.11
 
 - **En gäst får en identitet när livet skrivs.** Gästen får därmed ett stabilt

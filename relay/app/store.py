@@ -337,6 +337,18 @@ class Store:
     def person_by_name(self, name: str) -> sqlite3.Row | None:
         return self._db.execute("SELECT * FROM people WHERE name = ?", (name,)).fetchone()
 
+    def ensure_person(self, name: str) -> None:
+        """Give a name an identity now; used when a slot-only person is invited."""
+        self._ensure_person(name)
+        self._db.commit()
+
+    def drop_invite(self, code: str) -> None:
+        """Throw away an unused invitation, so only one pairing code is live."""
+        self._db.execute(
+            "DELETE FROM invites WHERE code = ? AND used_by IS NULL", (code,)
+        )
+        self._db.commit()
+
     def avatar_descriptor(self, person: sqlite3.Row | None) -> dict[str, Any]:
         """The avatar as clients read it; a person without one is a monogram."""
         if person is None:

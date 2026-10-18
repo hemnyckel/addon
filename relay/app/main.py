@@ -1386,6 +1386,40 @@ class State:
             "slots": _slot_rows(attrs, door.id),
         }
 
+    async def access_people(self) -> list[dict[str, Any]]:
+        """People who exist only as named slots in Home Assistant.
+
+        A fingerprint or a PIN is access even without the app: the name on the
+        slot *is* the person, so Personer must show them (with no device) and
+        let an invitation be minted later. One person can be on several doors
+        and carry several credential kinds; a nameless slot is nobody.
+        """
+        states = await self.ha.states()
+        found: dict[str, dict[str, set[str]]] = {}
+        for door in self.cfg.doors:
+            slots_state = _slot_sensor(states, door, "_slots")
+            if slots_state is None:
+                continue
+            for row in _slot_rows(_attributes(slots_state), door.id):
+                name = str(row.get("name") or "").strip()
+                if not name:
+                    continue
+                entry = found.setdefault(
+                    name, {"doors": set(), "credentials": set()}
+                )
+                entry["doors"].add(door.id)
+                entry["credentials"].update(
+                    str(kind) for kind in (row.get("credentials") or [])
+                )
+        return [
+            {
+                "name": name,
+                "doors": sorted(entry["doors"]),
+                "credentials": sorted(entry["credentials"]),
+            }
+            for name, entry in sorted(found.items())
+        ]
+
     async def slot_entry_id(self, door_id: str) -> str:
         """The live config entry id for a door, read from Home Assistant.
 
@@ -2050,6 +2084,27 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if device.get("role") == "guest":
             return {"people": []}
         people = state.store.directory()
+        known = {str(person.get("name") or "") for person in people}
+        for access in await state.access_people():
+            if access["name"] in known:
+                continue
+            identity = state.store.person_by_name(access["name"])
+            people.append({
+                "name": access["name"],
+                "role": "user",
+                "doors": access["doors"],
+                "days": None,
+                "from_time": None,
+                "to_time": None,
+                "expires": None,
+                "devices": [],
+                # Access without the app: a named fingerprint/PIN/RFID slot.
+                "access_only": True,
+                "credentials": access["credentials"],
+                "id": identity["id"] if identity is not None else None,
+                "avatar": state.store.avatar_descriptor(identity),
+            })
+        people.sort(key=lambda person: (not person.get("name"), person.get("name") or ""))
         if device.get("role") != "owner":
             people = [
                 {"id": p["id"], "name": p["name"], "role": p["role"], "avatar": p["avatar"]}
@@ -2325,6 +2380,74 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return {"code": code, "role": role, "expires_at": expires,
                 "doors": doors, "days": days, "guest_codes": guest_codes,
                 "failed": failed_doors}
+
+    @api.post("/people/{person}/invite")
+    async def invite_person(person: str,
+                            _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Mint a pairing code for someone who already exists — no lock writes.
+
+        A person may already have access without the app: a fingerprint, a PIN,
+        a guest code. This is how they get the app later. The code only pairs a
+        phone to the person they already are, so their access, history and icon
+        stay; a guest inherits the life it already has, and a family member
+        becomes a user. No lock code is created or rotated.
+        """
+        group = next(
+            (g for g in state.store.directory() if g.get("name") == person), None
+        )
+        if group is None:
+            access = next(
+                (a for a in await state.access_people() if a["name"] == person),
+                None,
+            )
+            if access is None:
+                raise HTTPException(404, "unknown person")
+            group = {
+                "name": person, "role": "user", "doors": access["doors"],
+                "days": None, "from_time": None, "to_time": None,
+                "expires": None, "devices": [],
+            }
+        if group.get("devices"):
+            raise HTTPException(409, "this person already has the app")
+
+        now = time.time()
+        role = "guest" if group.get("role") == "guest" else "user"
+        if role == "guest":
+            expires = group.get("expires")
+            # A guest without an end date is permanent; the pairing window can
+            # be long without the guest's life gaining an end it never had.
+            expires = float(expires) if expires is not None else now + 364 * 86400
+            if expires <= now:
+                raise HTTPException(409, "this guest's access has expired")
+            doors = [str(d) for d in (group.get("doors") or [])]
+            days = [int(d) for d in (group.get("days") or [])]
+            from_time = group.get("from_time")
+            to_time = group.get("to_time")
+        else:
+            # The invitation is a pairing window; the device itself is permanent.
+            expires = now + 3600
+            doors, days, from_time, to_time = [], [], None, None
+
+        # Only one live pairing code per person: a new one retires the old.
+        for existing in state.store.invites_for_person(person):
+            if not existing["used_by"]:
+                state.store.drop_invite(str(existing["code"]))
+
+        code = secrets.token_hex(3).upper()
+        state.store.add_invite(
+            code, person, role, doors, days, from_time, to_time, expires
+        )
+        state.store.ensure_person(person)
+        _LOGGER.info("Pairing invite for %s (%s)", person, role)
+        return {
+            "code": code,
+            "role": role,
+            "expires_at": expires,
+            "doors": doors,
+            "days": days,
+            "guest_codes": [],
+            "failed": [],
+        }
 
     @api.delete("/devices/{device_id}")
     async def revoke_device(device_id: str,

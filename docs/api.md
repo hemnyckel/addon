@@ -158,9 +158,22 @@ POST /pair-code                  # owner only; a fresh code for a new device
 
 `GET /people` is the Personer screen and is built from **people, not phones**:
 paired devices, guests who have a life but no phone (an unredeemed invitation,
-or a code made under Nycklar) and their devices beneath. A guest's life — doors,
-days, window, end date — is the source of truth for that guest, so it can be
-edited whether or not they ever install the app.
+or a code made under Nycklar), people who only exist as a **named slot** in the
+lock (a fingerprint, PIN or RFID with no app), and their devices beneath. A slot
+row carries `access_only: true` and the credential kinds it holds.
+
+`POST /people/<person>/invite` mints a **pairing code for someone who already
+exists** — no lock code is created or rotated. A guest inherits the life it
+already has; a family member becomes a `user` once the phone pairs. The person
+keeps their fingerprint, code, history and icon. Only one pairing code per
+person is live; a new one retires the old.
+
+```
+POST /people/Bella/invite         # owner only
+  -> 200 { "code": "A1B2C3", "role": "user", "expires_at": 1758...,
+           "doors": [], "days": [], "guest_codes": [], "failed": [] }
+  -> 409 this person already has the app / this guest's access has expired
+```
 
 `DELETE /people/<person>` removes a guest who has **no phone of their own**. The
 lock codes are cleared first; a door that cannot be reached refuses the removal
