@@ -1523,3 +1523,70 @@ def test_a_person_who_already_has_the_app_is_not_invited_again(cfg):
 
         assert response.status_code == 409
         assert "already has the app" in response.json()["detail"]
+
+
+def test_a_new_code_keeps_the_guests_life(cfg):
+    """Rotating a code must not move the window it works in."""
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        expires = time.time() + 7 * 86400
+        client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"], "days": [5],
+            "from_time": "07:45", "to_time": "12:00", "expires_at": expires,
+        })
+        before = dict(app.state.hmk.store.guest_life("Städfirma"))
+
+        fake.calls.clear()
+        result = client.post("/api/people/Städfirma/code",
+                             headers=owner, json={}).json()
+
+        assert [c[1] for c in fake.calls] == [
+            "revoke_guest_code", "create_recurring_guest",
+        ]
+        assert fake.calls[1][2]["schedule"] == [
+            {"days": ["fri"], "start": "07:45", "end": "12:00"}
+        ]
+        assert result["ok"] is True
+        assert result["code"] == fake.calls[1][2]["code"]
+        after = dict(app.state.hmk.store.guest_life("Städfirma"))
+        assert after["days"] == before["days"]
+        assert after["expires"] == before["expires"]
+
+
+def test_a_new_code_for_a_person_who_only_has_a_finger(cfg):
+    fake = FakeHa(states=slot_states(
+        ("front", "Ytterdörren", "ent-front",
+         [{"slot": 11, "name": "Bella", "credentials": ["fingerprint"]}]),
+    ), response={"ent-front": {"slot": 6}})
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        fake.calls.clear()
+        result = client.post("/api/people/Bella/code", headers=owner, json={
+            "doors": ["front"], "expires_at": time.time() + 86400,
+        }).json()
+
+        assert [c[1] for c in fake.calls] == ["create_guest_code"]
+        assert fake.calls[0][2]["name"] == "Bella"
+        assert result["ok"] is True
+        assert result["code"] == fake.calls[0][2]["code"]
+
+
+def test_a_new_code_for_a_family_person_needs_a_door(cfg):
+    fake = FakeHa(states=slot_states(
+        ("front", "Ytterdörren", "ent-front",
+         [{"slot": 11, "name": "Bella", "credentials": ["fingerprint"]}]),
+    ))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        response = client.post("/api/people/Bella/code", headers=owner, json={})
+
+        # A family person has no guest life to take doors from.
+        assert response.status_code == 400
+        assert fake.calls == []

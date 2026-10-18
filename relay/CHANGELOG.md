@@ -1,5 +1,13 @@
 # Ändringar
 
+## 0.10.14
+
+- **`POST /people/{person}/code` — en ny kod för en befintlig person.** Gamla
+  kodplatser rensas först; kan en dörr inte rensas vägrar bytet, så två koder
+  aldrig lever samtidigt. Samma siffror skrivs till alla personens dörrar, och
+  en gäst **behåller sitt liv** — dörrar, dagar, tider och slutdatum ändras
+  aldrig av en kodrotation.
+
 ## 0.10.13
 
 - **Åtkomstpersoner får en identitet första gången Personer läses**, så en

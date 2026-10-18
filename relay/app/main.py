@@ -2454,6 +2454,106 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "failed": [],
         }
 
+    @api.post("/people/{person}/code")
+    async def create_person_code(person: str, payload: dict[str, Any],
+                                 _: dict = Depends(require_owner)) -> dict[str, Any]:
+        """Write one fresh code for an existing person, on their doors.
+
+        A code belongs to a person, not to a slot. The person's old code slots
+        are cleared first - a code we cannot clear aborts the whole operation,
+        so two codes never live side by side - then the SAME digits are written
+        to every chosen door. A guest keeps its life: doors, days, window and
+        end date are untouched, so a new code never changes when it works.
+        """
+        group = next(
+            (g for g in state.store.directory() if g.get("name") == person), None
+        )
+        if group is None:
+            access = next(
+                (a for a in await state.access_people() if a["name"] == person),
+                None,
+            )
+            if access is None:
+                raise HTTPException(404, "unknown person")
+            group = {
+                "name": person, "role": "user", "doors": access["doors"],
+                "days": None, "from_time": None, "to_time": None,
+                "expires": None, "devices": [],
+            }
+
+        guest = group.get("role") == "guest"
+        chosen = [str(d) for d in (payload.get("doors") or [])
+                  if cfg.door(str(d)) is not None]
+        if guest:
+            doors = [str(d) for d in (group.get("doors") or [])]
+            if not doors:
+                doors = [door.id for door in cfg.doors]
+            days = [int(d) for d in (group.get("days") or [])]
+            from_time = group.get("from_time")
+            to_time = group.get("to_time")
+            expires = group.get("expires")
+            if expires is not None and float(expires) <= time.time():
+                raise HTTPException(409, "this guest's access has expired")
+        else:
+            if not chosen:
+                raise HTTPException(400, "choose at least one door")
+            doors, days, from_time, to_time = chosen, [], None, None
+            expires = None
+            if payload.get("expires_at") is not None:
+                try:
+                    expires = float(payload["expires_at"])
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        400, "expires_at must be a timestamp"
+                    ) from None
+                now = time.time()
+                if not now < expires <= now + 366 * 86400:
+                    raise HTTPException(
+                        400, "expires_at must be within the next year"
+                    )
+
+        failed_clear = await state.revoke_person_codes(person)
+        if failed_clear:
+            raise HTTPException(
+                502,
+                "the old code could not be cleared on "
+                + ", ".join(failed_clear),
+            )
+
+        code = _guest_code()
+        rows: list[dict[str, Any]] = []
+        for door_id in dict.fromkeys(doors):
+            door = cfg.door(door_id)
+            created = await state.create_lock_guest(
+                door_id, person, days, from_time, to_time, expires, code=code
+            )
+            rows.append({
+                "door": door_id,
+                "door_name": door.name if door is not None else door_id,
+                "slot": int(created["slot"]) if created else None,
+                "until": created.get("until") if created else None,
+                "ok": created is not None,
+                "error": None if created else "the lock did not take the code",
+            })
+        accepted = [row for row in rows if row["ok"]]
+        if accepted:
+            slots = dict(state.store.guest_slots(person))
+            for row in accepted:
+                if row["slot"] is not None:
+                    slots[str(row["door"])] = int(row["slot"])
+            state.store.set_guest_slots(person, slots)
+            state.store.ensure_person(person)
+        _LOGGER.info(
+            "New code for %s written to %s of %s door(s)",
+            person, len(accepted), len(rows),
+        )
+        return {
+            "ok": bool(accepted),
+            "code": code if accepted else None,
+            "doors": rows,
+            "failed": [row["door"] for row in rows if not row["ok"]],
+        }
+
     @api.delete("/devices/{device_id}")
     async def revoke_device(device_id: str,
                             device: dict = Depends(require_owner)) -> dict[str, Any]:
