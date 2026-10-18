@@ -1238,3 +1238,38 @@ def test_an_edit_that_moves_the_end_date_rewrites_every_door_with_one_code(cfg):
         codes = [c[2]["code"] for c in fake.calls if c[1] == "create_recurring_guest"]
         assert codes[0] == codes[1] == body["guest_codes"][0]["code"]
         assert body["guest_codes"][0]["code"] == body["guest_codes"][1]["code"]
+
+
+def test_a_retry_reuses_the_code_the_owner_already_saw(cfg):
+    """A failed door must be fixable without rotating the working doors.
+
+    The app keeps the code it showed once and passes it back with only the
+    doors that did not answer; the relay writes those digits and nothing else.
+    """
+    fake = FakeHa(
+        states=guest_sensor_states(("front", "Ytterdörren", "ent-front")),
+        response={"ent-front": {"slot": 6, "code": "000000"}},
+    )
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        result = client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"], "code": "482913",
+            "expires_at": time.time() + 86400,
+        }).json()
+
+        assert fake.calls[0][2]["code"] == "482913"
+        assert result["code"] == "482913"
+
+
+def test_a_retry_code_must_look_like_a_code(cfg):
+    fake = FakeHa(states=guest_sensor_states(("front", "Ytterdörren", "ent-front")))
+    app = guest_client(cfg, fake)
+    with TestClient(app) as client:
+        owner = pair_owner(client, app.state.hmk)
+        response = client.post("/api/guest-codes", headers=owner, json={
+            "name": "Städfirma", "doors": ["front"], "code": "abc",
+        })
+
+        assert response.status_code == 400
+        assert fake.calls == []

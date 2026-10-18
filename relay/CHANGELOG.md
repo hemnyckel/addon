@@ -1,5 +1,13 @@
 # Ändringar
 
+## 0.10.9
+
+- **En misslyckad dörr kan skrivas om med samma kod.** `POST /guest-codes` tar
+  emot en valfri `code` (4–8 siffror). Appen behåller koden den visade en gång
+  och skickar tillbaka den tillsammans med bara de dörrar som inte svarade —
+  annars skulle en ny kod ogiltigförklara siffrorna som redan getts till
+  personen.
+
 ## 0.10.8
 
 - **En kod till alla dörrar.** En gäst har nu en enda kod, som skrivs identiskt

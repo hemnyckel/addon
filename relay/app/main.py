@@ -2392,7 +2392,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             if not now < expires <= now + 366 * 86400:
                 raise HTTPException(400, "expires_at must be within the next year")
 
-        code = _guest_code()
+        code = str(payload.get("code") or "").strip() or _guest_code()
+        if not (code.isdigit() and 4 <= len(code) <= 8):
+            # A retry may pass the code the owner already saw, so the doors
+            # that failed can be fixed without rotating the successful ones.
+            raise HTTPException(400, "the code must be 4-8 digits")
         rows: list[dict[str, Any]] = []
         for door_id in dict.fromkeys(doors):
             door = cfg.door(door_id)

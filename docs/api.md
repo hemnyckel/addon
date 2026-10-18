@@ -345,7 +345,7 @@ DELETE /slots/6?door=front
 POST /guest-codes                 # owner only, no invitation and no device
   { "name": "Städfirma", "doors": ["front", "back"],
     "days": [5], "from_time": "07:45", "to_time": "12:00",
-    "expires_at": 1758... }
+    "expires_at": 1758..., "code": "482913" }
   -> 200 { "ok": true, "code": "482913", "failed": [],
            "doors": [ { "door": "front", "door_name": "Ytterdörren",
                         "slot": 6, "until": null, "ok": true, "error": null },
@@ -362,7 +362,8 @@ access. `days`, `from_time`, `to_time` and `expires_at` are optional; weekdays
 make it a recurring guest whose window the integration enforces. The response is
 a per-door result rather than an exception, so the app can say exactly which
 doors took the code and which did not. The code is returned **once** and never
-stored by the relay.
+stored by the relay. A retry may pass that `code` back with only the doors that
+failed: the digits the person already has then stay valid everywhere.
 
 `fingers` and `finger_state` are passed through from Home Assistant's slots
 sensor unchanged: the integration owns the labels and the policy, and the relay
