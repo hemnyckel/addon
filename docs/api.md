@@ -175,6 +175,20 @@ POST /people/Bella/invite         # owner only
   -> 409 this person already has the app / this guest's access has expired
 ```
 
+```
+POST /people/<person>/code      # owner only; a fresh code for an existing person
+  { "doors": ["front", "back"], "expires_at": 1758..., "code": "482913" }
+  -> 200 { "ok": true, "code": "482913", "failed": [],
+           "doors": [ … one result per door, exactly like /guest-codes … ] }
+  -> 502 the old code could not be cleared on <door>
+```
+
+A code belongs to the person, not to a slot. The person's old code slots are
+cleared first (a clear that fails aborts the rotation), then the same digits are
+written to every door. A guest keeps its life: doors, days, window and end date
+are untouched, so a new code never changes when it works. `code` is optional and
+exists so a retry can reuse the digits already shown.
+
 `DELETE /people/<person>` removes a guest who has **no phone of their own**. The
 lock codes are cleared first; a door that cannot be reached refuses the removal
 (`502` with the failing doors), because a forgotten guest with a live code is

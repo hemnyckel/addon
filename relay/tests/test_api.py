@@ -1542,8 +1542,8 @@ def test_a_new_code_keeps_the_guests_life(cfg):
         before = dict(app.state.hmk.store.guest_life("Städfirma"))
 
         fake.calls.clear()
-        result = client.post("/api/people/Städfirma/code",
-                             headers=owner, json={}).json()
+        result = client.post("/api/people/Städfirma/code", headers=owner,
+                             json={"code": "482913"}).json()
 
         assert [c[1] for c in fake.calls] == [
             "revoke_guest_code", "create_recurring_guest",
@@ -1552,7 +1552,8 @@ def test_a_new_code_keeps_the_guests_life(cfg):
             {"days": ["fri"], "start": "07:45", "end": "12:00"}
         ]
         assert result["ok"] is True
-        assert result["code"] == fake.calls[1][2]["code"]
+        assert fake.calls[1][2]["code"] == "482913"
+        assert result["code"] == "482913"
         after = dict(app.state.hmk.store.guest_life("Städfirma"))
         assert after["days"] == before["days"]
         assert after["expires"] == before["expires"]

@@ -1,5 +1,12 @@
 # Ändringar
 
+## 0.10.15
+
+- **Återförsök med samma kod även för en befintlig person.**
+  `POST /people/{person}/code` tar emot en valfri `code` (4–8 siffror), så en
+  dörr som inte svarade kan skrivas om utan att koden på de andra dörrarna
+  roteras.
+
 ## 0.10.14
 
 - **`POST /people/{person}/code` — en ny kod för en befintlig person.** Gamla

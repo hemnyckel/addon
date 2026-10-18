@@ -2520,7 +2520,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 + ", ".join(failed_clear),
             )
 
-        code = _guest_code()
+        code = str(payload.get("code") or "").strip() or _guest_code()
+        if not (code.isdigit() and 4 <= len(code) <= 8):
+            raise HTTPException(400, "the code must be 4-8 digits")
         rows: list[dict[str, Any]] = []
         for door_id in dict.fromkeys(doors):
             door = cfg.door(door_id)
