@@ -1,5 +1,12 @@
 # Ändringar
 
+## 0.10.13
+
+- **Åtkomstpersoner får en identitet första gången Personer läses**, så en
+  person som bara finns som finger-/kodplats kan ges en ikon redan innan någon
+  inbjudan har skapats. Identiteten skapas en gång; listan skriver aldrig om en
+  person som redan finns.
+
 ## 0.10.12
 
 - **Personer visar även den som bara har åtkomst i låset.** Ett namn på en

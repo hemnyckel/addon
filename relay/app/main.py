@@ -2089,6 +2089,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             if access["name"] in known:
                 continue
             identity = state.store.person_by_name(access["name"])
+            if identity is None:
+                # A person found on a lock gets an identity the first time the
+                # list is read, so an icon can be set before any invitation.
+                state.store.ensure_person(access["name"])
+                identity = state.store.person_by_name(access["name"])
             people.append({
                 "name": access["name"],
                 "role": "user",
