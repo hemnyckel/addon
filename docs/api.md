@@ -66,8 +66,8 @@ GET /state
       "doors": [ { "id":"front","name":"...","locked":true,"open":false,
                    "battery":92,"last_event":Event } ],
       "presence": {
-        "claes": { "state":"home", "source":"geofence", "at":1758...,
-                   "last_home":1758..., "stale":false },
+        "claes": { "state":"home", "source":"wifi", "at":1758...,
+                   "evidence":"router", "last_home":1758..., "stale":false },
         "anna":  { "state":"away", "source":"geofence", "at":1758...,
                    "last_home":1758..., "stale":false }
       },
@@ -77,12 +77,14 @@ GET /state
     }
 ```
 
-`presence` is per **person** and comes from that person's phone geofence, with
-a shelf life (see [Presence](#presence)). `state` is the effective state now,
-`source` is `geofence` (the truth) or `lock` (a brief hint), `at` is when it was
-last confirmed, `last_home` is the last confirmed home (so a lapsed one can read
-"senast hemma 09:17"), and `stale` marks a `home` whose confirmation has run
-out. It is empty for a guest. `last_event_at` is the journal's **ingest** truth
+`presence` is per **person** and comes from that person's phone geofence and
+from the home network, each with a shelf life (see [Presence](#presence)).
+`state` is the effective state now; `source` is `wifi` (the house saw the phone),
+`geofence` (the phone's own report) or `lock` (a brief hint); `evidence` says
+what saw it on the network (`router` or `wifi`) and only rides along on a
+`wifi` entry; `at` is when it was last confirmed; `last_home` is the last
+confirmed home (so a lapsed one can read "senast hemma 09:17"); and `stale` marks
+a `home` whose confirmation has run out. It is empty for a guest. `last_event_at` is the journal's **ingest** truth
 — the newest event's timestamp, `null` on an empty journal — the same pulse
 `/health` reports, so the app can tell "no events" from "the read path is
 behind".
@@ -434,10 +436,24 @@ reachable right now; try again"}` — never a raw upstream error.
 ## Presence
 
 Every phone watches a geofence around the house and reports when it comes and
-goes. The geofence is the **truth**: a phone's own enter/exit report is the only
-thing that sets presence. An unlock (app, keypad, finger or tag) is only a
-**hint** — a door can see an arrival, but it is not a location, and an app unlock
-can be pressed from anywhere — so it never sets presence by itself.
+goes. The geofence is the phone's own account, and for a long time it was the
+only one. There is now a second, independent one: the **home network**. The
+relay reads the phones' network readings from Home Assistant — a router's
+`device_tracker` (`source_type: router`) and, where the companion app runs, its
+`SSID`/`BSSID` sensors — and a phone the house can see is at home right now.
+
+The network is **one-way evidence**: on it means home, off it means nothing at
+all. iOS puts Wi-Fi to sleep when the phone rests, a phone keeps a café's network
+for a while, and a sensor can read "Not Connected" at the kitchen table; none of
+that is evidence of being anywhere. The relay therefore stores only home
+readings. A reading is trusted for **five minutes** (`wifi_window`), which keeps
+a phone that reports in bursts from flickering between sources, and it is checked
+*first* — the router is not the thing that jitters at the edge of a zone. It
+travels as `source: "wifi"` with an `evidence` field (`"router"` or `"wifi"`).
+
+An unlock (app, keypad, finger or tag) is only a **hint** — a door can see an
+arrival, but it is not a location, and an app unlock can be pressed from
+anywhere — so it never sets presence by itself.
 
 Presence has a **shelf life**. A geofence `home` is trusted for **4 hours**
 measured from the report; after that the person reads as `away` again, with
@@ -451,9 +467,9 @@ Four hours is deliberate: long enough to cover an outing or a school run the
 phone never explicitly reported leaving, short enough that one blip has expired
 within the same half-day. An unlock can corroborate a home that has *just*
 lapsed, for 30 minutes, and only that; such an entry is tagged `source: "lock"`,
-never `geofence`, so the board — which shows only geofence-confirmed people —
-never guesses from it. A person the relay has never seen a geofence report from
-has no presence at all.
+never `geofence`, so the board never guesses from it. A person the relay has
+never heard from — neither a geofence report nor a sighting on the network — has
+no presence at all.
 
 ```
 POST /presence            Authorization: Bearer <device_token>

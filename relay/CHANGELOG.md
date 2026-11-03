@@ -1,5 +1,24 @@
 # Ändringar
 
+## 0.10.19
+
+- **Hemmanätet som extra hemma-bekräftelse.** Reläet läser telefonernas
+  nätverksavläsningar ur Home Assistant — en routers `device_tracker`
+  (`source_type: router`) och companion-appens `SSID`/`BSSID`-sensor — och en
+  telefon som huset ser är hemma. Avläsningen räknas i fem minuter
+  (`wifi_window`), så en telefon som rapporterar i skurar inte flimrar mellan
+  källor.
+- **Bara åt ett håll.** På hemmanätet ⇒ hemma; inget hemmanät ⇒ ingen slutsats.
+  Reläet sparar aldrig ett "inte på WiFi", så en telefon med radiosläckt WiFi är
+  tyst — inte borta. Geofencen avgör allt nätet inte kan.
+- **Syns i `/state`** som `source: "wifi"` med `evidence` (`router` eller
+  `wifi`), och kontrolleras före geofencen: en GPS som fladdrar i kanten av zonen
+  förlorar mot en router som ser telefonen. `wifi_enabled: false` stänger av
+  hela modulen.
+- **Personer matchas mot sina egna entiteter** (`device_tracker.claes_iphone_unifi`
+  → Claes). `wifi_people` pekar en person på en entitet som inte bär deras namn,
+  och `home_ssids`/`home_bssids` behövs för att SSID/BSSID-sensorer ska räknas.
+
 ## 0.10.16
 
 - **`POST /people` — en person innan första fingret.** En person kan skapas utan

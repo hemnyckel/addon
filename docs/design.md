@@ -64,10 +64,13 @@ iPad: `NavigationSplitView` (sidebar: doors + people; detail: a door).
 - Optimistic UI: immediate haptic + a "working" state, confirmed by the real
   state, with a clear, recoverable banner on failure.
 - Presence row: a monogram per person, Home/Away from their **phone's geofence**
-  — the only thing that sets presence. It has a shelf life: a `home` expires a
-  few hours after it was last confirmed, an unlock only ever *supports* it
-  briefly (never for hours), and someone whose signal went quiet reads as away
-  with "senast hemma HH:mm". The board shows only geofence-confirmed people.
+  and from the **home network** the relay reads out of Home Assistant (a router's
+  tracker, or the companion app's SSID/BSSID). Both have a shelf life: a geofence
+  `home` expires a few hours after it was last confirmed, a network sighting
+  after five minutes, an unlock only ever *supports* a home briefly (never for
+  hours). The network can only ever confirm — never deny — so someone whose
+  signal went quiet reads as away with "senast hemma HH:mm" only when the
+  geofence said so.
 - States: **offline** (relay/HA down) dims the surface and explains how to retry;
   **unknown** ("unattributed"); **first run** guides pairing.
 

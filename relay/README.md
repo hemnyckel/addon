@@ -40,6 +40,11 @@ Options (Home Assistant add-on options, or environment variables):
 | `price_divisor` | Turns the sensor's unit into kr/kWh (default `100`, i.e. öre → kr) |
 | `energy_currency` | Fallback currency when the sensor carries none (default `SEK`) |
 | `energy_attributes_type` | The iOS `ActivityAttributes` type name for the energy card (default `HemnyckelEnergyAttributes`) |
+| `wifi_enabled` | Let the home network confirm "at home" as a second opinion (default `true`) |
+| `home_ssids` | The home network's name(s), comma-separated, e.g. `Slottet, Slottet 5G`. Empty = trust the router only |
+| `home_bssids` | The home access points' BSSIDs, comma-separated, for the companion app's BSSID sensor |
+| `wifi_window` | How long a Wi-Fi reading stays fresh, in seconds (default `300`) |
+| `wifi_people` | Optional per-person entity map, as JSON: `{"Claes": ["device_tracker.claes_iphone_unifi"]}` |
 | `doors` | A list of `{id, name, lock_entity, door_sensor?, entry_id?}` |
 | `mqtt_host` / `mqtt_port` / `mqtt_user` / `mqtt_password` | The MQTT broker, only for a Supervisor that hands the add-on no broker of its own — normally Home Assistant supplies it (see *Roles from Home Assistant*) |
 
@@ -112,6 +117,29 @@ device's push-to-start token. The card's Lock/Unlock button is an App Intent tha
 talks to the relay directly. A lock updates the card to "Låst", which lingers for
 about a minute (an undo window) before the relay ends it; unlocking in that
 window cancels the end. See `../docs/api.md` for the three registration calls.
+
+## At home on the network
+
+A phone on the house's network is at home, and that is a better answer than a
+geofence read through a wall. The relay reads what Home Assistant already knows:
+a **router's `device_tracker`** (`source_type: router`, as UniFi and friends
+publish) and, where the companion app runs, its `sensor.*_ssid` /
+`sensor.*_bssid`. A person's entities are the ones named after them
+(`device_tracker.claes_iphone_unifi` → Claes); set `wifi_people` to point
+someone at an entity that is not.
+
+The rule is one-way:
+
+> on the home network ⇒ home — nothing on the network ⇒ **no conclusion**
+
+A phone that sleeps its Wi-Fi is not away, so the relay never records a "not on
+Wi-Fi", and the geofence still decides everything the network cannot. A reading
+is trusted for `wifi_window` seconds (five minutes by default) and arrives as
+`source: "wifi"` in `/state`, so the app shows the same "Hemma" it always did.
+
+Turn it off with `wifi_enabled: false`. With `home_ssids` empty, only router
+trackers count: an SSID sensor reads whatever network the phone found, and
+without a name to compare it says nothing about *this* house.
 
 ## Cheapest hours (opt-in)
 

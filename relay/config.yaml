@@ -1,5 +1,5 @@
 name: "Hemnyckel"
-version: "0.10.18"
+version: "0.10.19"
 slug: "hemnyckel"
 description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
 url: "https://github.com/hemnyckel/addon"
@@ -51,6 +51,20 @@ options:
   price_divisor: 100
   energy_currency: "SEK"
   energy_attributes_type: "HemnyckelEnergyAttributes"
+  # WiFi som extra hemma-bekräftelse. Reläet läser telefonernas nätverk ur
+  # Home Assistant: en routers device_tracker (source_type: router) och/eller
+  # companion-appens SSID/BSSID-sensor. Det kan bara lägga till ett "hemma",
+  # aldrig ett "borta".
+  wifi_enabled: true
+  # Namnen på hemmets nät. Tomt = lita på routern; SSID/BSSID-sensorer jämförs
+  # bara mot namn som står här. Kommaseparerat, t.ex. "Slottet, Slottet 5G".
+  home_ssids: ""
+  home_bssids: ""
+  # Hur länge en WiFi-avläsning räknas som färsk (sekunder).
+  wifi_window: 300
+  # Valfri personspecifik koppling, JSON: {"Claes": ["sensor.claes_iphone_ssid"]}.
+  # Utan den matchas en person mot de entiteter som bär deras namn.
+  wifi_people: ""
   # The broker. Normally the relay takes it from Home Assistant (the
   # supervisor-injected MQTT_* environment, or the Supervisor's registered
   # MQTT service); these are the manual last resort for a Supervisor that
@@ -78,6 +92,11 @@ schema:
   price_divisor: float
   energy_currency: str
   energy_attributes_type: str
+  wifi_enabled: bool
+  home_ssids: str
+  home_bssids: str
+  wifi_window: int
+  wifi_people: str
   mqtt_host: str
   mqtt_port: port
   mqtt_user: str

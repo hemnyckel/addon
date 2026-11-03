@@ -22,6 +22,15 @@ _PRESENCE_TTL = 4 * 3600
 # lapsed, for this long - but it never sets presence by itself, and never for
 # the hours a geofence does.
 _UNLOCK_HINT = 30 * 60
+# A Wi-Fi reading is the strongest evidence there is that someone is in the
+# house, but it is a *moment*: the router sees a phone join, and the phone's
+# SSID sensor updates in minutes. It is trusted this long after the last
+# reading, so a phone that reports every few minutes reads as steadily home
+# instead of flickering between sources.
+_WIFI_TTL = 5 * 60
+# Which sighting to keep when two land in the same instant: the router cannot be
+# wrong about the phone, so it outranks a network name.
+_EVIDENCE_RANK = {"wifi": 1, "router": 2}
 
 # The local journal is bounded: the newest events are kept, the rest are
 # dropped. This is also the default query size, so a client that reads history
@@ -78,8 +87,10 @@ _GUEST_SLOTS_KEY = "guest_slots"
 
 class Store:
     def __init__(self, data_dir: str, *,
-                 share_dir: str | None = None) -> None:
+                 share_dir: str | None = None,
+                 wifi_window: float = _WIFI_TTL) -> None:
         os.makedirs(data_dir, exist_ok=True)
+        self._wifi_window = wifi_window
         # A person's photo lives beside the database, in the add-on's /data, so
         # it survives an update and travels in a Home Assistant snapshot.
         self._avatars_dir = os.path.join(data_dir, "avatars")
@@ -152,6 +163,15 @@ class Store:
                 state TEXT NOT NULL,
                 updated REAL NOT NULL,
                 last_home REAL
+            );
+            -- The last time a person's phone was seen on the home network, and
+            -- what saw it. Separate from ``presence`` because it is a different
+            -- kind of fact: a reading with a short shelf life, not a geofence
+            -- report with a long one. It never records an away.
+            CREATE TABLE IF NOT EXISTS presence_wifi (
+                person TEXT PRIMARY KEY,
+                seen REAL NOT NULL,
+                evidence TEXT
             );
             CREATE TABLE IF NOT EXISTS live_activities (
                 device TEXT NOT NULL,
@@ -665,6 +685,7 @@ class Store:
         self._db.execute("DELETE FROM guest_lives WHERE person = ?", (person,))
         self._db.execute("DELETE FROM invites WHERE name = ?", (person,))
         self._db.execute("DELETE FROM presence WHERE person = ?", (person,))
+        self._db.execute("DELETE FROM presence_wifi WHERE person = ?", (person,))
         self._db.commit()
         self._prune_person(person)
 
@@ -752,6 +773,20 @@ class Store:
         """
         self._db.execute("UPDATE devices SET person = ? WHERE person = ?", (new, old))
         self._db.execute("UPDATE presence SET person = ? WHERE person = ?", (new, old))
+        # The Wi-Fi reading follows the name too, and a merge onto a name that
+        # already has one keeps the more recent sighting - never two rows.
+        moved_wifi = self._db.execute(
+            "SELECT seen, evidence FROM presence_wifi WHERE person = ?", (old,)
+        ).fetchone()
+        if moved_wifi is not None:
+            self._db.execute("DELETE FROM presence_wifi WHERE person = ?", (old,))
+            self._db.execute(
+                "INSERT INTO presence_wifi (person, seen, evidence) VALUES (?, ?, ?) "
+                "ON CONFLICT(person) DO UPDATE SET seen = MAX(seen, excluded.seen), "
+                "evidence = CASE WHEN excluded.seen >= seen THEN excluded.evidence "
+                "ELSE evidence END",
+                (new, float(moved_wifi["seen"]), moved_wifi["evidence"]),
+            )
         self._db.execute("UPDATE invites SET name = ? WHERE name = ?", (new, old))
         if self.guest_life(new) is None:
             self._db.execute(
@@ -921,6 +956,9 @@ class Store:
         if int(count["c"]) > 0:
             return
         self._db.execute("DELETE FROM guest_lives WHERE person = ?", (name,))
+        # A Wi-Fi reading belongs to the person, not to the phone: with their
+        # last device gone there is nobody left to be at home.
+        self._db.execute("DELETE FROM presence_wifi WHERE person = ?", (name,))
         person = self.person_by_name(name)
         if person is None:
             self._db.commit()
@@ -1140,20 +1178,30 @@ class Store:
         ]
 
     def presence(self, *, now: float | None = None) -> dict[str, dict[str, Any]]:
-        """Each person's presence, from their phone's geofence, with a shelf life.
+        """Each person's presence, from their geofence and the home network.
 
-        The geofence is the truth: a phone's own enter/exit report is the only
-        thing that sets presence, and a ``home`` is trusted for ``_PRESENCE_TTL``.
-        Once that window has passed the person reads as away again, with the time
-        of the last confirmed home kept in ``last_home`` (what the app can show as
-        "senast hemma"). An ``away`` never expires - it stays until a later
-        report - because away is not a claim that needs a clock.
+        Two independent things can say someone is home, and each has its own
+        shelf life.
+
+        The geofence is the phone's own account: an enter/exit report, with a
+        ``home`` trusted for ``_PRESENCE_TTL``. Once that window has passed the
+        person reads as away again, with the time of the last confirmed home
+        kept in ``last_home`` (what the app can show as "senast hemma"). An
+        ``away`` never expires - it stays until a later report - because away is
+        not a claim that needs a clock.
+
+        A Wi-Fi reading is the house's own account: the router saw the phone, or
+        the phone's SSID sensor named the home network. It is trusted for
+        ``_WIFI_TTL`` and arrives as ``source: "wifi"``. It is checked first,
+        because it is the most immediate truth there is - and it can only ever
+        confirm, never deny: the relay records no "not on Wi-Fi", so a phone that
+        slept its radio is simply silent, not away.
 
         An unlock is a hint that travels with ``source: "lock"``: it can keep a
         home that has just lapsed for ``_UNLOCK_HINT``, but it never sets presence
         on its own, never flips an explicit away back to home, and never lasts the
-        hours a geofence does. A person the relay has never seen a geofence report
-        from has no presence at all - the board never guesses.
+        hours a geofence does. A person the relay has never heard from has no
+        presence at all - the board never guesses.
         """
         moment = time.time() if now is None else now
         latest_unlock: dict[str, float] = {}
@@ -1163,17 +1211,42 @@ class Store:
         ):
             latest_unlock[str(row["person"])] = float(row["ts"])
 
+        wifi: dict[str, tuple[float, str | None]] = {
+            str(row["person"]): (float(row["seen"]), row["evidence"])
+            for row in self._db.execute("SELECT person, seen, evidence FROM presence_wifi")
+        }
+        rows = {
+            str(row["person"]): row
+            for row in self._db.execute(
+                "SELECT person, state, updated, last_home FROM presence"
+            )
+        }
+
         result: dict[str, dict[str, Any]] = {}
-        for row in self._db.execute(
-            "SELECT person, state, updated, last_home FROM presence"
-        ):
-            person = str(row["person"])
-            state = str(row["state"])
-            updated = float(row["updated"])
-            recorded = row["last_home"]
+        for person in set(rows) | set(wifi):
+            row = rows.get(person)
+            seen, evidence = wifi.get(person, (None, None))
+            state = str(row["state"]) if row is not None else ""
+            updated = float(row["updated"]) if row is not None else None
+            recorded = row["last_home"] if row is not None else None
             last_home = float(recorded) if recorded is not None else (
                 updated if state == "home" else None
             )
+            if seen is not None and moment - seen <= self._wifi_window:
+                # The house just saw the phone. This outranks a geofence away
+                # that is minutes old, because GPS at the edge of the zone is
+                # the thing that flickers, and the router is not.
+                result[person] = {
+                    "state": "home", "source": "wifi", "at": seen,
+                    "evidence": evidence,
+                    "last_home": seen if last_home is None else max(last_home, seen),
+                    "stale": False,
+                }
+                continue
+            if row is None:
+                # Only ever seen on Wi-Fi, and that reading has lapsed: there is
+                # nothing to say. Silence is not an away.
+                continue
             if state == "home" and moment - updated > _PRESENCE_TTL:
                 unlock_at = latest_unlock.get(person)
                 if unlock_at is not None and moment - unlock_at <= _UNLOCK_HINT:
@@ -1214,6 +1287,38 @@ class Store:
             "last_home = CASE WHEN excluded.state = 'home' THEN excluded.updated "
             "ELSE presence.last_home END",
             (person, state, now, now if state == "home" else None),
+        )
+        self._db.commit()
+
+    def note_wifi(self, person: str, *, evidence: str | None = None,
+                  at: float | None = None) -> None:
+        """Record that this person's phone was seen on the home network.
+
+        Only a *home* reading ever reaches here. The relay deliberately keeps no
+        row for "not on Wi-Fi": a phone with its radio asleep is not evidence of
+        being away, so there is nothing to record and nothing to expire.
+        """
+        moment = time.time() if at is None else at
+        # Every reading is a person: same identity rule as set_presence, so a
+        # rename can never leave a Wi-Fi row with no people row.
+        self._ensure_person(person)
+        kept = self._db.execute(
+            "SELECT seen, evidence FROM presence_wifi WHERE person = ?", (person,)
+        ).fetchone()
+        if kept is not None:
+            if float(kept["seen"]) > moment:
+                return
+            # At the same moment a router's sighting outranks an SSID name: the
+            # router cannot be wrong about the phone, and the row should say the
+            # stronger thing.
+            if (float(kept["seen"]) == moment
+                    and _EVIDENCE_RANK.get(str(kept["evidence"]), 0)
+                    > _EVIDENCE_RANK.get(str(evidence), 0)):
+                return
+        self._db.execute(
+            "INSERT OR REPLACE INTO presence_wifi (person, seen, evidence) "
+            "VALUES (?, ?, ?)",
+            (person, moment, evidence),
         )
         self._db.commit()
 

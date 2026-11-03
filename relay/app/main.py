@@ -32,6 +32,7 @@ from .events import from_ha
 from .ha import HaClient
 from .mqtt import MqttBridge
 from .store import EVENTS_MAX, Store
+from .wifi import HomeWifi
 
 _LOGGER = logging.getLogger("hemnyckel")
 
@@ -42,6 +43,10 @@ _ALERT_TTL = 3600
 _LIVE_TTL = 3600
 _LIVE_END_TTL = 300
 _LIVE_START_GRACE = 300
+# How often the person -> Wi-Fi entity map may be rebuilt. Home Assistant sends
+# a state change for the whole house, so the household is re-read at most this
+# often; a phone paired a minute ago is mapped within the minute.
+_WIFI_REMAP = 60.0
 # After a door locks, keep the (now "Låst") Live Activity around for a short
 # while so its button can flip to "Lås upp" — an undo window — then end it.
 _LIVE_LINGER = 60
@@ -537,7 +542,8 @@ def _refusal_reason(response: Any) -> str:
 class State:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.store = Store(cfg.data_dir, share_dir=avatar.SHARE_AVATAR_DIR)
+        self.store = Store(cfg.data_dir, share_dir=avatar.SHARE_AVATAR_DIR,
+                           wifi_window=cfg.wifi_window)
         self.store.ensure_owner()
         self.apns = ApnsClient(cfg)
         # The MQTT bridge is a projection of what this store holds, published to
@@ -549,6 +555,13 @@ class State:
         # first retained document says "ha": false. The HA connection coming up
         # is the moment that becomes untrue, and this republishes the facts.
         self.ha = HaClient(cfg, self.on_ha_event, on_connected=self.on_ha_connected)
+        # Who owns which Wi-Fi entity in Home Assistant, rebuilt when the
+        # household changes (a new phone, a rename).
+        self._wifi: HomeWifi | None = None
+        self._wifi_people: tuple[str, ...] = ()
+        # When the household was last read: the map is rebuilt when it changes,
+        # but not on every state change Home Assistant sends.
+        self._wifi_checked = 0.0
         self.pair_code = ""
         self.pair_expires = 0.0
         self.new_pair_code()
@@ -634,7 +647,63 @@ class State:
         projection republished before the session settles.
         """
         self.mqtt.publish_state()
+        await self.refresh_wifi()
         await self.refresh_base_url()
+
+    def wifi_mapper(self) -> HomeWifi | None:
+        """The current household's Wi-Fi map, or None when the module is off.
+
+        Rebuilt when the household changes: the app can add a phone or rename a
+        person, and the entity that proves they are home is named after them.
+        """
+        if not self.cfg.wifi_enabled:
+            return None
+        now = time.time()
+        if self._wifi is not None and now - self._wifi_checked < _WIFI_REMAP:
+            return self._wifi
+        self._wifi_checked = now
+        people = tuple(self.store.persons())
+        if self._wifi is None or people != self._wifi_people:
+            self._wifi = HomeWifi(
+                people,
+                entity_map=self.cfg.wifi_people,
+                home_ssids=self.cfg.home_ssids,
+                home_bssids=self.cfg.home_bssids,
+            )
+            self._wifi_people = people
+        return self._wifi
+
+    async def refresh_wifi(self) -> None:
+        """Read every state once, so a fresh start knows who is on the network.
+
+        The relay subscribes to ``state_changed`` for the same facts, but a
+        reading only changes when a phone joins or leaves: relying on the stream
+        alone would leave a restart blind until the next roam.
+        """
+        mapper = self.wifi_mapper()
+        if mapper is None:
+            return
+        moment = time.time()
+        for reading in mapper.readings(await self.ha.states()):
+            self.store.note_wifi(reading.person, evidence=reading.evidence, at=moment)
+            _LOGGER.debug("Wi-Fi: %s at home via %s", reading.person, reading.entity_id)
+
+    def note_wifi_state(self, event: dict[str, Any]) -> None:
+        """One Home Assistant state change, as a Wi-Fi reading when it says home."""
+        mapper = self.wifi_mapper()
+        if mapper is None:
+            return
+        data = event.get("data") or {}
+        new_state = data.get("new_state") or {}
+        reading = mapper.reading(
+            str(data.get("entity_id") or ""),
+            new_state.get("state"),
+            new_state.get("attributes") or {},
+        )
+        if reading is None:
+            return
+        self.store.note_wifi(reading.person, evidence=reading.evidence)
+        _LOGGER.debug("Wi-Fi: %s at home via %s", reading.person, reading.entity_id)
 
     async def refresh_base_url(self) -> None:
         """Learn Home Assistant's origin, then republish the projection.
@@ -686,6 +755,12 @@ class State:
     # -- incoming events -----------------------------------------------------
     async def on_ha_event(self, event: dict[str, Any]) -> None:
         try:
+            if event.get("event_type") == "state_changed":
+                # A lock's own state changes are read live elsewhere; the only
+                # event here worth keeping is a phone landing on the home
+                # network, which is presence, not history.
+                self.note_wifi_state(event)
+                return
             mapped = from_ha(self.cfg, event)
             if mapped is None:
                 return

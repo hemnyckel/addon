@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -48,6 +49,22 @@ class Config:
     price_divisor: float = 100.0
     energy_currency: str = "SEK"
     energy_attributes_type: str = "HemnyckelEnergyAttributes"
+    # Wi-Fi as a second opinion on "at home": the phones' own network readings,
+    # read from Home Assistant (a router's device_tracker, or the companion
+    # app's SSID/BSSID sensors). It can only ever *add* a home - a Wi-Fi that
+    # says nothing is not an away - and it is held for `wifi_window` seconds so
+    # a phone that reports every few minutes does not flicker.
+    wifi_enabled: bool = True
+    # The network(s) that count as home. Empty means "trust the router": a
+    # device_tracker with `source_type: router` that says home is home, because
+    # the router only sees devices behind the house. An SSID/BSSID sensor needs
+    # a name to compare against, so it is ignored until one is configured.
+    home_ssids: list[str] = field(default_factory=list)
+    home_bssids: list[str] = field(default_factory=list)
+    wifi_window: float = 5 * 60
+    # Optional per-person override: {"Claes": ["sensor.claes_iphone_ssid", ...]}.
+    # Without it the relay matches a person to the entities named after them.
+    wifi_people: dict[str, list[str]] = field(default_factory=dict)
     data_dir: str = "/data"
     port: int = 8099
     doors: list[Door] = field(default_factory=list)
@@ -118,6 +135,33 @@ def _int(value: str, default: int) -> int:
         return default
 
 
+def _csv(value: Any) -> list[str]:
+    """A list option: a YAML list, or a comma-separated string.
+
+    Add-on options are strings as often as they are lists, and a name may carry
+    a space ("Slottet 5G"), so the split is on commas only and every entry is
+    trimmed - never on whitespace.
+    """
+    items = ([str(item) for item in value] if isinstance(value, (list, tuple))
+             else str(value or "").split(","))
+    return [item.strip() for item in items if item.strip()]
+
+
+def _people_map(value: Any) -> dict[str, list[str]]:
+    """Per-person entity overrides, as JSON or as a mapping."""
+    if isinstance(value, dict):
+        data = value
+    else:
+        try:
+            data = json.loads(str(value or "{}"))
+        except ValueError:
+            data = {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(person): _csv(entities) for person, entities in data.items()
+            if str(person).strip()}
+
+
 def load_config() -> Config:
     opts = _options_file()
     def pick(env: str, key: str, default: str = "") -> str:
@@ -169,6 +213,13 @@ def load_config() -> Config:
         energy_attributes_type=pick(
             "HEMNYCKEL_ENERGY_ATTRIBUTES_TYPE", "energy_attributes_type", "HemnyckelEnergyAttributes"
         ),
+        wifi_enabled=_bool(pick("HEMNYCKEL_WIFI_ENABLED", "wifi_enabled", "true")),
+        home_ssids=_csv(pick("HEMNYCKEL_HOME_SSIDS", "home_ssids", "")),
+        home_bssids=_csv(pick("HEMNYCKEL_HOME_BSSIDS", "home_bssids", "")),
+        wifi_window=_float(
+            pick("HEMNYCKEL_WIFI_WINDOW", "wifi_window", "300"), 300.0
+        ),
+        wifi_people=_people_map(pick("HEMNYCKEL_WIFI_PEOPLE", "wifi_people", "{}")),
         data_dir=pick("HEMNYCKEL_DATA_DIR", "data_dir", "/data"),
         port=int(pick("HEMNYCKEL_PORT", "port", "8099")),
         doors=doors,
