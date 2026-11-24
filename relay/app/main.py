@@ -54,6 +54,19 @@ _LIVE_LINGER = 60
 _ATTRIBUTION_TTL = 20
 # Method text shown for an action the app caused.
 _APP_METHOD = "App"
+# A garage door is driven by impulses: the ESPHome device owns the interlock
+# (it refuses to pulse in the wrong state), and the relay presses its buttons.
+# app action -> (field on Door, the event action to credit afterwards)
+_GARAGE_ACTIONS = {
+    "open": ("open_button", "unlock"),
+    "close": ("close_button", "lock"),
+    "stop": ("stop_button", None),
+    # Porten står still mellan givarna: en impuls får den att gå vidare.
+    "pulse": ("pulse_button", None),
+}
+# How long we wait before reading the sensors again to confirm a garage action:
+# long enough for the motor to leave the end position, short enough to be snappy.
+_GARAGE_CONFIRM_DELAY = 1.6
 # A lock with no attribution that follows an unlock within this window is the
 # lock's own auto-relock (the lock reports it as "unattributed", like any other).
 _AUTO_RELOCK_WINDOW = 30
@@ -756,11 +769,10 @@ class State:
     async def on_ha_event(self, event: dict[str, Any]) -> None:
         try:
             if event.get("event_type") == "state_changed":
-                # A lock's own state changes are read live elsewhere; the only
-                # event here worth keeping is a phone landing on the home
-                # network, which is presence, not history.
+                # En låsändring läses live i /state och blir aldrig en händelse.
+                # Det som är värt att behålla här är en telefon som landar på
+                # hemmanätet (närvaro) — och en garageport som når ett ändläge.
                 self.note_wifi_state(event)
-                return
             mapped = from_ha(self.cfg, event)
             if mapped is None:
                 return
@@ -839,6 +851,11 @@ class State:
         """
         if ev.get("action") != "lock" or ev.get("source") != "unattributed":
             return
+        door = self.cfg.door(ev["door"])
+        if door is not None and door.is_garage:
+            # En port som stängs är ingen automatisk återlåsning — den är bara
+            # stängd. Låsets 30-sekundersfönster gäller bara lås.
+            return
         unlocked_at = self._last_unlock.get(ev["door"])
         if unlocked_at is None or ev["ts"] - unlocked_at > _AUTO_RELOCK_WINDOW:
             return
@@ -856,7 +873,10 @@ class State:
         # is the facts, including the door's human name, so the phone can write
         # the visible words itself, in its own language.
         person = ev.get("person") or "Någon"
-        verb = "Låstes upp" if ev["action"] == "unlock" else "Låstes"
+        if door.is_garage:
+            verb = "Öppnades" if ev["action"] == "unlock" else "Stängdes"
+        else:
+            verb = "Låstes upp" if ev["action"] == "unlock" else "Låstes"
         when = time.strftime("%H:%M", time.localtime(ev["ts"]))
         return {
             "aps": {
@@ -938,6 +958,10 @@ class State:
             return
         door = self.cfg.door(ev["door"])
         if door is None:
+            return
+        # En port är inte ett lås: kortet visar lås/upplåst med en låsknapp,
+        # vilket skulle ljuga om porten. Portens läge finns i appen.
+        if door.is_garage:
             return
         locked = ev["action"] != "unlock"
         state = live.content_state(
@@ -1414,8 +1438,12 @@ class State:
     async def do_action(self, door_id: str, action: str,
                         device: dict[str, Any] | None = None) -> dict[str, Any]:
         door = self.cfg.door(door_id)
-        if door is None or action not in ("lock", "unlock"):
-            raise HTTPException(400, "unknown door or action")
+        if door is None:
+            raise HTTPException(400, "unknown door")
+        if door.is_garage:
+            return await self._do_garage_action(door, action, device)
+        if action not in ("lock", "unlock"):
+            raise HTTPException(400, "unknown action")
         if device is not None:
             # Before the service call: the lock may report back first.
             self.note_app_action(door.id, action, device)
@@ -1427,7 +1455,95 @@ class State:
         confirmed = state == ("unlocked" if action == "unlock" else "locked")
         return {"ok": True, "confirmed": confirmed}
 
+    async def _entity_on(self, entity_id: str | None) -> bool | None:
+        """True/False for a sensor, None when it is absent or unreadable."""
+        if not entity_id:
+            return None
+        state = await self.ha.entity_state(entity_id)
+        if state in ("on", "off"):
+            return state == "on"
+        return None
+
+    async def _garage_state(self, door: Door) -> dict[str, Any]:
+        """Where the door is: open, closed, or somewhere between the sensors.
+
+        ``open`` is True only when the open sensor says so and False only when
+        the closed one does. Anything else is unknown — a garage door must never
+        be reported closed by default.
+        """
+        closed = await self._entity_on(door.closed_sensor)
+        opened = await self._entity_on(door.open_sensor)
+        moving = await self._entity_on(door.moving_sensor)
+        if opened:
+            position: bool | None = True
+        elif closed:
+            position = False
+        else:
+            position = None
+        return {"open": position, "moving": moving}
+
+    async def _do_garage_action(self, door: Door, action: str,
+                                device: dict[str, Any] | None) -> dict[str, Any]:
+        """Press one of the port's buttons — the device owns the interlocks.
+
+        ESPHome refuses to pulse in the wrong state, so the relay checks first
+        and says *why* nothing happened instead of reporting a silent success.
+        """
+        spec = _GARAGE_ACTIONS.get(action)
+        if spec is None:
+            raise HTTPException(400, "unknown action")
+        field, event_action = spec
+        entity_id = getattr(door, field, None)
+        if not entity_id:
+            raise HTTPException(400, f"{door.id} has no {field.replace('_', ' ')}")
+
+        before = await self._garage_state(door)
+        if action == "open" and before["open"] is True:
+            return {"ok": False, "confirmed": False, "detail": "already open"}
+        if action == "close" and before["open"] is False:
+            return {"ok": False, "confirmed": False, "detail": "already closed"}
+        if action == "stop" and before["moving"] is False:
+            return {"ok": False, "confirmed": False, "detail": "not moving"}
+        if action == "pulse" and (before["open"] is not None or before["moving"] is True):
+            return {"ok": False, "confirmed": False, "detail": "not between"}
+
+        if device is not None and event_action is not None:
+            # The end-of-travel event lands a moment later; credit it to whoever
+            # pressed, exactly like an app-initiated lock.
+            self.note_app_action(door.id, event_action, device)
+
+        ok = await self.ha.call_service("button", "press", {"entity_id": entity_id})
+        if not ok:
+            return {"ok": False, "confirmed": False}
+
+        await asyncio.sleep(_GARAGE_CONFIRM_DELAY)
+        after = await self._garage_state(door)
+        confirmed: bool | None
+        if action == "stop":
+            confirmed = None if after["moving"] is None else after["moving"] is False
+        elif action == "pulse":
+            # Impulsen startar porten; rörelseflaggan är kvittot.
+            confirmed = None if after["moving"] is None else after["moving"] is True
+        elif before["open"] is None:
+            # No usable end sensors: never claim the door did something.
+            confirmed = None
+        elif action == "open":
+            # Success means the door left the closed position, not that it has
+            # already arrived — an opening takes tens of seconds.
+            confirmed = after["open"] is not False
+        else:
+            confirmed = after["open"] is not True
+        return {"ok": True, "confirmed": confirmed}
+
     async def door_state(self, door: Door) -> dict[str, Any]:
+        if door.is_garage:
+            garage = await self._garage_state(door)
+            return {
+                "id": door.id, "name": door.name, "kind": "garage",
+                "locked": None,
+                "open": garage["open"], "moving": garage["moving"],
+                "last_event": self.store.last_event(door.id),
+            }
         locked = None
         state = await self.ha.entity_state(door.lock_entity)
         if state == "locked":
@@ -1440,7 +1556,8 @@ class State:
             if s in ("on", "off"):
                 opened = s == "on"
         return {
-            "id": door.id, "name": door.name, "locked": locked, "open": opened,
+            "id": door.id, "name": door.name, "kind": "lock",
+            "locked": locked, "open": opened,
             "last_event": self.store.last_event(door.id),
         }
 

@@ -145,6 +145,36 @@ def from_hemsmart(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def from_garage(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
+    """A garage door has no journal — its two end-of-travel sensors are the news.
+
+    Only the *positive* edge becomes an event: the door arriving at an end
+    position. The negative edge (leaving it) is the same journey seen from the
+    other side, and turning both into events would double every opening.
+    """
+    data = event.get("data") or {}
+    entity_id = str(data.get("entity_id") or "")
+    door = cfg.door_by_garage_sensor(entity_id)
+    if door is None:
+        return None
+    if (data.get("new_state") or {}).get("state") != "on":
+        return None
+    opened = entity_id == door.open_sensor
+    return {
+        "id": uuid.uuid4().hex,
+        "ts": _to_epoch(event.get("time_fired_ts") or event.get("time_fired")),
+        "door": door.id,
+        "person": None,
+        "slot": None,
+        # Samma vokabulär som låsen: "upplåst" betyder här "öppen", så historik,
+        # notiser och attribution fungerar utan en andra händelsetyp.
+        "action": "unlock" if opened else "lock",
+        "source": "unattributed",
+        "method": _method_text("unattributed"),
+        "door_open": opened,
+    }
+
+
 def from_ha(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
     # The integration's journal is the attributed source of truth (who / when /
     # how). Lock state changes are read live via the state endpoint, not turned
@@ -153,4 +183,7 @@ def from_ha(cfg: Config, event: dict[str, Any]) -> dict[str, Any] | None:
         return from_journal(cfg, event)
     if event.get("event_type") == "hemsmart_lock":
         return from_hemsmart(cfg, event)
+    # En port har ingen journal: dess två ändlägesgivare är händelserna.
+    if event.get("event_type") == "state_changed":
+        return from_garage(cfg, event)
     return None

@@ -108,6 +108,60 @@ that person, so history reads "Claes · App" instead of "Oattribuerad" (and the
 is short-lived and only ever applies to a report that carries no attribution of
 its own — a keypad or fingerprint entry is never overwritten.
 
+## Garage doors
+
+A motorised garage door is not a lock: it is open, closed, or somewhere between
+the two, and it is driven by impulses rather than by a lock/unlock command. Such
+a door is configured with `kind: "garage"` instead of `lock_entity`, and the
+relay presses the ESPHome device's buttons — which own the interlocks, so a
+pulse can never be sent in a state where it would do the opposite of what was
+asked.
+
+```
+{ "id": "garage", "name": "Garageport", "kind": "garage",
+  "closed_sensor": "binary_sensor.garageport_givare_stangd_binar",
+  "open_sensor":   "binary_sensor.garageport_givare_oppen_binar",
+  "moving_sensor": "binary_sensor.garageport_i_rorelse",
+  "open_button":   "button.garageport_oppna",
+  "close_button":  "button.garageport_stang",
+  "stop_button":   "button.garageport_stopp",
+  "pulse_button":  "button.garageport_puls" }
+```
+
+`GET /state` reports it as:
+
+```
+{ "id": "garage", "name": "Garageport", "kind": "garage",
+  "locked": null, "open": true | false | null, "moving": true | false | null }
+```
+
+`open` is `true` only when the open sensor says so and `false` only when the
+closed one does; anything else is **unknown**, never "closed" by default.
+
+Four actions, each one button press:
+
+```
+POST /action  { "door": "garage", "action": "open" | "close" | "stop" | "pulse" }
+  -> 200 { "ok": true, "confirmed": true | false | null }
+  -> 200 { "ok": false, "detail": "already open" | "already closed"
+                                    | "not moving" | "not between" }
+```
+
+- `open` / `close` — refused with a reason when the door is already there.
+- `stop` — only while it is travelling.
+- `pulse` — only when it stands between the sensors; one impulse sends it on.
+- `confirmed` means *the door left the position it was in* (or, for `stop`, that
+  it is no longer moving). It never means "the door has arrived"; a full travel
+  takes tens of seconds. `null` means there were no usable end sensors to tell.
+
+`open` is treated exactly like `unlock` for attribution: the end-of-travel event
+that follows is credited to the person whose device pressed, and the notification
+reads "Öppnades" rather than "Låstes upp". A garage door has no Live Activity —
+the card shows a lock, which would be a lie about a port. Events use the shared
+vocabulary: **`unlock` = the door opened, `lock` = it closed**, and only the
+positive edge becomes an event (arriving at an end position — the other edge is
+the same journey from the other side).
+
 ## Live Activities
 
 While a door is unlocked, the relay keeps a Live Activity (Lock Screen +

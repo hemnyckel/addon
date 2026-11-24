@@ -16,11 +16,28 @@ from typing import Any
 class Door:
     id: str
     name: str
-    lock_entity: str
+    lock_entity: str = ""
     door_sensor: str | None = None
     entry_id: str | None = None
     # optional fallback: lock slot -> person id, when the event carries no name
     persons: dict[str, str] = field(default_factory=dict)
+
+    # --- garageportar -----------------------------------------------------
+    # En motoriserad port styrs inte med lock/unlock utan med impulser. ESPHome
+    # äger logiken (spärrar mot att pulsa i fel läge), så reläet trycker på dess
+    # knappar och läser läget ur tre sensorer i stället för att gissa.
+    kind: str = "lock"                     # "lock" | "garage"
+    closed_sensor: str | None = None       # på när porten står stängd
+    open_sensor: str | None = None         # på när porten står öppen
+    moving_sensor: str | None = None       # på medan porten rör sig
+    open_button: str | None = None
+    close_button: str | None = None
+    stop_button: str | None = None
+    pulse_button: str | None = None        # "kör vidare" mellan givarna
+
+    @property
+    def is_garage(self) -> bool:
+        return self.kind == "garage"
 
 
 @dataclass
@@ -97,6 +114,15 @@ class Config:
 
     def door_by_entry(self, entry_id: str) -> Door | None:
         return next((d for d in self.doors if d.entry_id == entry_id), None)
+
+    def door_by_garage_sensor(self, entity_id: str) -> Door | None:
+        """The garage door an end-of-travel sensor belongs to."""
+        for door in self.doors:
+            if not door.is_garage:
+                continue
+            if entity_id and entity_id in (door.closed_sensor, door.open_sensor):
+                return door
+        return None
 
 
 def _options_file() -> dict:

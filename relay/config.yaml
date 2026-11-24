@@ -1,5 +1,5 @@
 name: "Hemnyckel"
-version: "0.10.19"
+version: "0.10.20"
 slug: "hemnyckel"
 description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
 url: "https://github.com/hemnyckel/addon"
@@ -104,6 +104,16 @@ schema:
   doors:
     - id: str
       name: str
-      lock_entity: str
+      # "lock" (standard) eller "garage"
+      kind: list(lock|garage)?
+      lock_entity: str?
       door_sensor: str?
       entry_id: str?
+      # garageportar: två ändlägesgivare, en rörelseflagga och knappar
+      closed_sensor: str?
+      open_sensor: str?
+      moving_sensor: str?
+      open_button: str?
+      close_button: str?
+      stop_button: str?
+      pulse_button: str?

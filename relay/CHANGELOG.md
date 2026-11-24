@@ -1,5 +1,27 @@
 # Ändringar
 
+## 0.10.20
+
+- **Garageporten.** En motoriserad port är inte ett lås: den är öppen, stängd
+  eller på väg mellan två ändlägen, och den styrs med impulser. En dörr med
+  `kind: "garage"` läser läget ur två ändlägesgivare (`closed_sensor`,
+  `open_sensor`) plus en rörelseflagga (`moving_sensor`) och styr genom att
+  trycka på ESPHome-enhetens knappar (`open_button`, `close_button`,
+  `stop_button`, `pulse_button`) — enheten äger spärrarna, så en impuls kan
+  aldrig skickas i ett läge där den gör motsatsen.
+- **Fyra åtgärder:** `open`, `close`, `stop` och `pulse`, med ärliga avslag i
+  stället för tyst framgång: `already open`, `already closed`, `not moving`,
+  `not between`. `confirmed` betyder att porten *lämnade* läget den stod i —
+  aldrig att den hunnit fram — och är `null` när givarna saknas.
+- **Läget är aldrig gissat.** `open` är sant bara när öppengivaren säger det och
+  falskt bara när stängdgivaren gör det; allt annat är okänt. En port
+  rapporteras aldrig som stängd av misstag.
+- **Händelser när porten når ett ändläge** (bara den positiva flanken, annars
+  hade varje resa blivit två rader), krediterade personen som tryckte i appen,
+  och notisen säger "Öppnades" i stället för "Låstes upp". En port som stängs
+  klassas aldrig som automatisk återlåsning, och portar har ingen Live Activity
+  — kortet visar ett lås, vilket skulle ljuga.
+
 ## 0.10.19
 
 - **Hemmanätet som extra hemma-bekräftelse.** Reläet läser telefonernas
