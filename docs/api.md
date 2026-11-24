@@ -162,6 +162,41 @@ vocabulary: **`unlock` = the door opened, `lock` = it closed**, and only the
 positive edge becomes an event (arriving at an end position — the other edge is
 the same journey from the other side).
 
+### A door left open
+
+A garage door that stands open is the one event nobody reports: the lock is not
+involved, and no one pressed anything. The relay keeps the clock itself and
+sends **one** reminder per opening once the limit has passed
+(`open_alert_minutes`, 10 by default; `0` turns it off; a door can set its own).
+The reminder is a question, not an alarm — quiet hours are deliberately bypassed,
+because an open port at 03:00 is exactly what you want to know about.
+
+```json
+{ "aps": { "alert": { "title": "Garageport",
+                      "subtitle": "Öppen i 12 min",
+                      "body": "Ska den vara öppen? Öppna appen för att se garaget." },
+           "mutable-content": 1, "category": "DOOR_EVENT",
+           "interruption-level": "time-sensitive" },
+  "door": "garage",
+  "snapshot": "/api/snapshot/garage" }
+```
+
+APNs cannot carry an image, so `snapshot` is a **relative** path: the app's
+notification extension prefixes it with the relay it is paired to and fetches it
+with its own device token. The relay therefore never has to know its own public
+address, and the picture is what the camera sees *when the notification arrives*.
+
+```
+GET /snapshot/<door>        Authorization: Bearer <device_token>
+  -> 200 image/jpeg         # Home Assistant's camera proxy, one still
+  -> 404 no camera for this door
+  -> 502 the camera did not answer
+```
+
+A guest may only fetch snapshots for their own doors. Set `snapshot_entity` on
+the door (a `camera.*` entity) to enable it; without one the reminder is sent
+without a `snapshot` key.
+
 ## Live Activities
 
 While a door is unlocked, the relay keeps a Live Activity (Lock Screen +

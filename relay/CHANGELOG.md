@@ -1,5 +1,21 @@
 # Ändringar
 
+## 0.10.21
+
+- **Påminnelse när garageporten stått öppen för länge.** Reläet håller reda på
+  sedan när en port står öppet och skickar **en** notis per öppning när gränsen
+  passerats (`open_alert_minutes`, 10 minuter som standard, `0` stänger av,
+  och varje dörr kan sätta sitt eget värde). Frågan är ärlig: *"Öppen i 12 min —
+  ska den vara öppen?"* Tysta timmar hoppas med flit över; en port som står
+  öppen klockan tre på natten är precis den nyhet man vill ha då.
+- **Bilden med i notisen.** Har dörren en `snapshot_entity` (en `camera.*`)
+  skickas ingen bild i pushen — den kan APNs inte bära — utan en *relativ*
+  adress i nyttolasten. Appens notistjänst hämtar `GET /api/snapshot/<dörr>`
+  med sitt eget enhetstoken och bifogar den, så reläet aldrig behöver veta sin
+  egen publika adress och bilden är den kameran ser **när notisen kommer**.
+- Snapshot-endpointen är autentiserad som resten av API:t: gäster ser bara
+  sina egna dörrar, en dörr utan kamera svarar 404 och en tyst kamera 502.
+
 ## 0.10.20
 
 - **Garageporten.** En motoriserad port är inte ett lås: den är öppen, stängd

@@ -67,6 +67,8 @@ _GARAGE_ACTIONS = {
 # How long we wait before reading the sensors again to confirm a garage action:
 # long enough for the motor to leave the end position, short enough to be snappy.
 _GARAGE_CONFIRM_DELAY = 1.6
+# Hur ofta påminnelsen tittar på portarna (sekunder).
+_OPEN_ALERT_INTERVAL = 60
 # A lock with no attribution that follows an unlock within this window is the
 # lock's own auto-relock (the lock reports it as "unattributed", like any other).
 _AUTO_RELOCK_WINDOW = 30
@@ -587,6 +589,9 @@ class State:
         self._pending_attributions: dict[tuple[str, str], dict[str, Any]] = {}
         # When each door was last unlocked, to recognise its automatic relock.
         self._last_unlock: dict[str, float] = {}
+        # Sedan när en port stått öppen, och om vi redan påmint för den öppningen.
+        self._open_since: dict[str, float] = {}
+        self._open_alerted: set[str] = set()
         # Pairing attempts per client, to bound brute force.
         self._pair_attempts: dict[str, list[float]] = {}
         # Whether the journal's read path was already reported as diverging, so
@@ -1299,6 +1304,107 @@ class State:
             self.store.drop_energy_activity(row["device"])
 
     # -- waste: the household's collection days ------------------------------
+    # -- en port som står öppen ----------------------------------------------
+    async def run_open_alerts(self) -> None:
+        """Porten står öppen? Påminn familjen en gång, efter en stund."""
+        while True:
+            try:
+                await self._open_alert_tick()
+            except Exception:
+                _LOGGER.exception("open alert tick failed")
+            await asyncio.sleep(_OPEN_ALERT_INTERVAL)
+
+    def _open_alert_minutes(self, door: Door) -> int:
+        """The door's own limit, or the house's. 0 (or less) means off."""
+        if door.open_alert_minutes is None:
+            return self.cfg.open_alert_minutes
+        return door.open_alert_minutes
+
+    async def _open_alert_tick(self, now: float | None = None) -> None:
+        """Start the clock, or remind once per opening.
+
+        ``now`` is injectable so the reminder can be tested without waiting ten
+        real minutes for a door to be forgotten.
+        """
+        moment = time.time() if now is None else now
+        for door in self.cfg.doors:
+            if not door.is_garage:
+                continue
+            minutes = self._open_alert_minutes(door)
+            if minutes <= 0:
+                continue
+            state = await self._garage_state(door)
+            if state["open"] is not True:
+                # Stängd (eller okänd): nästa öppning börjar om från noll.
+                self._open_since.pop(door.id, None)
+                self._open_alerted.discard(door.id)
+                continue
+            since = self._open_since.setdefault(door.id, moment)
+            if door.id in self._open_alerted:
+                continue
+            if moment - since >= minutes * 60:
+                self._open_alerted.add(door.id)
+                await self.send_open_alert(door, int((moment - since) // 60))
+
+    def open_alert_payload(self, door: Door, minutes: int) -> dict[str, Any]:
+        """The reminder itself: a question, and the door it is about."""
+        aps: dict[str, Any] = {
+            "alert": {
+                "title": door.name,
+                "subtitle": f"Öppen i {minutes} min",
+                "body": "Ska den vara öppen? Öppna appen för att se garaget.",
+            },
+            "sound": "default",
+            "category": "DOOR_EVENT",
+            "interruption-level": "time-sensitive",
+            "thread-id": f"door-{door.id}",
+            "mutable-content": 1,
+            "relevance-score": 0.8,
+        }
+        payload: dict[str, Any] = {
+            "aps": aps,
+            "door": door.id,
+            # Fakta, inte ord: appens notistjänst skriver texten på telefonens
+            # språk. Den svenska aps-texten är bara fallback.
+            "garage": {"door": door.id, "door_name": door.name, "minutes": minutes},
+        }
+        if door.snapshot_entity:
+            # The app's notification extension prefixes this with the relay it is
+            # paired to and fetches it with its own token — so the relay never has
+            # to know its own public address.
+            payload["snapshot"] = f"/api/snapshot/{door.id}"
+        return payload
+
+    async def send_open_alert(self, door: Door, minutes: int) -> None:
+        payload = self.open_alert_payload(door, minutes)
+        collapse_id = f"door-{door.id}-open-alert"[:64]
+        expiration = int(time.time()) + _ALERT_TTL
+
+        targets = []
+        for device in self.store.devices():
+            if device["role"] == "guest":
+                continue
+            if not device["apns_token"]:
+                continue
+            prefs = _prefs(device["prefs"])
+            if prefs.get("doors") and door.id not in prefs["doors"]:
+                continue
+            # Med flit förbi tysta timmar: en port som står öppen klockan tre på
+            # natten är precis den nyhet man vill ha då.
+            targets.append(device)
+
+        async def deliver(device: Any) -> None:
+            async with self._send_sem:
+                result = await self.apns.send(
+                    device["apns_token"], payload,
+                    env=normalize_env(device["apns_env"] or self.cfg.apns_env),
+                    expiration=expiration, collapse_id=collapse_id,
+                )
+            if result.invalidate_token:
+                self.store.disable_apns(device["id"])
+
+        await asyncio.gather(*(deliver(d) for d in targets))
+
     async def run_waste(self) -> None:
         """The bins pulse: remind the evening before, and again in the morning."""
         while True:
@@ -2037,11 +2143,13 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         task = asyncio.create_task(state.ha.run())
         energy_task = asyncio.create_task(state.run_energy()) if cfg.energy_enabled else None
         waste_task = asyncio.create_task(state.run_waste())
+        alert_task = asyncio.create_task(state.run_open_alerts())
         yield
         task.cancel()
         if energy_task is not None:
             energy_task.cancel()
         waste_task.cancel()
+        alert_task.cancel()
         state.cancel_live_ends()
         await state.mqtt.stop()
         await state.apns.stop()
@@ -3099,6 +3207,26 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             if not _schedule_ok(device, time.time()):
                 raise HTTPException(403, "outside the guest's hours")
         return await state.do_action(door_id, str(payload.get("action")), device)
+
+    @api.get("/snapshot/{door_id}")
+    async def door_snapshot(door_id: str,
+                            device: dict = Depends(require_device)) -> Response:
+        """A door's camera, one still. The push notification's extension fetches
+        this and attaches it, so the reminder shows the garage as it is *now*."""
+        door = cfg.door(door_id)
+        if door is None:
+            raise HTTPException(404, "unknown door")
+        if device.get("role") == "guest":
+            allowed = _device_doors(device) or []
+            if door_id not in allowed:
+                raise HTTPException(403, "not your door")
+        if not door.snapshot_entity:
+            raise HTTPException(404, "no camera for this door")
+        image = await state.ha.camera_image(door.snapshot_entity)
+        if image is None:
+            raise HTTPException(502, "the camera did not answer")
+        return Response(content=image, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
 
     # -- live activities (Lock Screen / Dynamic Island) ---------------------
     @api.post("/live/start-token")

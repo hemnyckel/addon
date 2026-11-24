@@ -193,6 +193,19 @@ class HaClient:
             return []
         return body if isinstance(body, list) else []
 
+    async def camera_image(self, entity_id: str) -> bytes | None:
+        """The camera's current still, as JPEG — Home Assistant's own proxy."""
+        if self._http is None:
+            return None
+        resp = await self._http.get(
+            f"/api/camera_proxy/{entity_id}",
+            headers={"Authorization": f"Bearer {self._cfg.ha_token}"},
+        )
+        if resp.status_code != 200:
+            _LOGGER.warning("HA camera %s -> %s", entity_id, resp.status_code)
+            return None
+        return resp.content
+
     async def entity_state(self, entity_id: str) -> str | None:
         if self._http is None:
             return None

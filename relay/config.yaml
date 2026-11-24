@@ -1,5 +1,5 @@
 name: "Hemnyckel"
-version: "0.10.20"
+version: "0.10.21"
 slug: "hemnyckel"
 description: "Hemnyckel-reläet: lokala låshändelser till Apple-notiser, och appens åtgärder tillbaka till Home Assistant."
 url: "https://github.com/hemnyckel/addon"
@@ -40,6 +40,7 @@ options:
   apns_env: "production"
   apns_topic: ""
   live_enabled: true
+  open_alert_minutes: 10
   live_attributes_type: "HemnyckelLockAttributes"
   # Elpris: billigaste timmarna från en Home Assistant-prissensor. Av som
   # standard och sensorgenerisk - det publika add-onet körs även utanför
@@ -84,6 +85,7 @@ schema:
   apns_env: list(development|production)
   apns_topic: str
   live_enabled: bool
+  open_alert_minutes: int
   live_attributes_type: str
   energy_enabled: bool
   price_entity: str
@@ -117,3 +119,6 @@ schema:
       close_button: str?
       stop_button: str?
       pulse_button: str?
+      # påminnelse när porten stått öppen för länge, och en kamera att visa
+      open_alert_minutes: int?
+      snapshot_entity: str?

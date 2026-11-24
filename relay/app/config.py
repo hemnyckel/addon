@@ -34,6 +34,10 @@ class Door:
     close_button: str | None = None
     stop_button: str | None = None
     pulse_button: str | None = None        # "kör vidare" mellan givarna
+    # Påminnelse när porten stått öppen för länge, och en kamera att visa.
+    # 0/None = använd det globala värdet; negativt = av för den här dörren.
+    open_alert_minutes: int | None = None
+    snapshot_entity: str | None = None     # camera.* som ger en bild
 
     @property
     def is_garage(self) -> bool:
@@ -85,6 +89,8 @@ class Config:
     data_dir: str = "/data"
     port: int = 8099
     doors: list[Door] = field(default_factory=list)
+    # Efter så här många minuter med öppen garageport påminns familjen. 0 = av.
+    open_alert_minutes: int = 10
 
     @property
     def apns_configured(self) -> bool:
@@ -246,6 +252,9 @@ def load_config() -> Config:
             pick("HEMNYCKEL_WIFI_WINDOW", "wifi_window", "300"), 300.0
         ),
         wifi_people=_people_map(pick("HEMNYCKEL_WIFI_PEOPLE", "wifi_people", "{}")),
+        open_alert_minutes=_int(
+            pick("HEMNYCKEL_OPEN_ALERT_MINUTES", "open_alert_minutes", "10"), 10
+        ),
         data_dir=pick("HEMNYCKEL_DATA_DIR", "data_dir", "/data"),
         port=int(pick("HEMNYCKEL_PORT", "port", "8099")),
         doors=doors,
